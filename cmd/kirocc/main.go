@@ -19,6 +19,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/config"
 	"github.com/d-kuro/kirocc/internal/kirocatalog"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
+	"github.com/d-kuro/kirocc/internal/kirousage"
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/server"
@@ -86,11 +87,13 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	kiroClient := buildKiroClient(authMgr, cfg)
-	srv := buildServer(authMgr, kiroClient, cfg, webSearch)
+	usage := kirousage.NewMonitor()
+	srv := buildServer(authMgr, kiroClient, cfg, webSearch, usage)
 
 	if cfg.ModelDiscovery {
 		go discoverModels(ctx, authMgr, cfg.KiroAPIRegion)
 	}
+	go reportUsage(ctx, authMgr, cfg.KiroAPIRegion, usage)
 
 	// Eagerly initialize tiktoken so the first API request doesn't block on BPE data fetch.
 	go tokencount.Preload()
@@ -113,7 +116,7 @@ func run(ctx context.Context, args []string) error {
 		// Slowloris is mitigated by ReadHeaderTimeout on the request side.
 	}
 
-	done := awaitShutdown(httpSrv, otelShutdown, logCloser)
+	done := awaitShutdown(httpSrv, otelShutdown, logCloser, usage.LogSummary)
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server: %w", err)
@@ -190,6 +193,9 @@ func buildKiroClient(authMgr *auth.AuthManager, cfg config.Config) kiroclient.Cl
 // runs in the background and a slow answer costs nothing.
 const modelDiscoveryTimeout = 20 * time.Second
 
+// usageQueryTimeout bounds the startup usage-limits fetch, for the same reason.
+const usageQueryTimeout = 20 * time.Second
+
 // discoverModels installs Kiro's advertised model catalog as a fallback layer
 // behind the built-in mapping table, so a model Kiro launches after this build
 // resolves with the right context window and effort enum instead of falling
@@ -240,10 +246,60 @@ func discoverModels(ctx context.Context, authMgr *auth.AuthManager, regionOverri
 	added := models.SetCatalog(entries)
 	slog.Info("model catalog discovered",
 		"region", region, "advertised", len(catalog), "new_models", added)
+	logModelRates(catalog)
 }
 
-func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config.Config, webSearch websearch.Provider) *server.Server {
+// logModelRates logs each advertised model's credit multiplier on one line, so
+// the relative cost of switching models is visible at startup.
+func logModelRates(catalog []kirocatalog.Model) {
+	var args []any
+	for _, m := range catalog {
+		if m.RateMultiplier > 0 {
+			args = append(args, m.ID, strconv.FormatFloat(m.RateMultiplier, 'f', -1, 64)+"x")
+		}
+	}
+	if len(args) > 0 {
+		slog.Info("model rates", args...)
+	}
+}
+
+// reportUsage logs the account's usage limits at startup and stores them for
+// the per-request remaining estimate. Like discoverModels it runs in the
+// background and is best-effort: a failure costs one log line.
+func reportUsage(ctx context.Context, authMgr *auth.AuthManager, regionOverride string, usage *kirousage.Monitor) {
+	ctx, cancel := context.WithTimeout(ctx, usageQueryTimeout)
+	defer cancel()
+
+	creds, err := authMgr.GetToken(ctx)
+	if err != nil {
+		slog.Debug("usage query skipped: no credentials", "err", err)
+		return
+	}
+	if creds.ProfileARN == "" {
+		// API keys carry no profile ARN, and the API rejects a request without one.
+		slog.Debug("usage query skipped: credential has no profile ARN", "auth_type", creds.AuthType)
+		return
+	}
+	region := creds.Region
+	if regionOverride != "" {
+		region = regionOverride
+	}
+
+	err = usage.Refresh(ctx, func(ctx context.Context) (*kirousage.Limits, error) {
+		return kirousage.New().Get(ctx, kirousage.Request{
+			Token:      creds.AccessToken,
+			Region:     region,
+			ProfileARN: creds.ProfileARN,
+		})
+	})
+	if err != nil {
+		slog.Warn("usage query failed", "region", region, "err", err)
+	}
+}
+
+func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config.Config, webSearch websearch.Provider, usage *kirousage.Monitor) *server.Server {
 	opts := []server.ServerOption{
+		server.WithUsageMonitor(usage),
 		server.WithKeepAliveInterval(cfg.KeepAliveInterval),
 		server.WithPromoteOnThinking(cfg.PromoteOnThinking),
 		server.WithMaxRequestBody(cfg.MaxRequestBody),
@@ -265,9 +321,9 @@ func isLoopback(host string) bool {
 }
 
 // awaitShutdown registers a SIGINT/SIGTERM handler that gracefully stops the
-// HTTP server, flushes OTel spans, and closes the log file. Returns a channel
-// that closes when shutdown is complete.
-func awaitShutdown(httpSrv *http.Server, otelShutdown func(context.Context) error, logCloser interface{ Close() error }) <-chan struct{} {
+// HTTP server, logs the session usage summary, flushes OTel spans, and closes
+// the log file. Returns a channel that closes when shutdown is complete.
+func awaitShutdown(httpSrv *http.Server, otelShutdown func(context.Context) error, logCloser interface{ Close() error }, logSummary func()) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -280,6 +336,9 @@ func awaitShutdown(httpSrv *http.Server, otelShutdown func(context.Context) erro
 		if err := httpSrv.Shutdown(ctx); err != nil {
 			slog.Error("shutdown error", "err", err)
 		}
+		// After Shutdown so in-flight responses are counted, before the log
+		// file closes so the summary lands in it.
+		logSummary()
 		if otelShutdown != nil {
 			if err := otelShutdown(ctx); err != nil {
 				slog.Error("otel shutdown error", "err", err)

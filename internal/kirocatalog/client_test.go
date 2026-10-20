@@ -22,6 +22,7 @@ const catalogFixture = `{
     },
     {
       "modelId": "claude-opus-5",
+      "rateMultiplier": 2.2,
       "tokenLimits": {"maxInputTokens": 1000000, "maxOutputTokens": 128000},
       "additionalModelRequestFieldsSchema": {
         "type": "object",
@@ -95,6 +96,7 @@ func TestClient_List(t *testing.T) {
 			MaxInputTokens:  1_000_000,
 			MaxOutputTokens: 128_000,
 			EffortEnum:      []string{"low", "medium", "high", "xhigh", "max"},
+			RateMultiplier:  2.2,
 		},
 		{ID: "claude-haiku-4.5", MaxInputTokens: 200_000, MaxOutputTokens: 64_000},
 	}
@@ -105,6 +107,7 @@ func TestClient_List(t *testing.T) {
 		if got[i].ID != want[i].ID ||
 			got[i].MaxInputTokens != want[i].MaxInputTokens ||
 			got[i].MaxOutputTokens != want[i].MaxOutputTokens ||
+			got[i].RateMultiplier != want[i].RateMultiplier ||
 			!slices.Equal(got[i].EffortEnum, want[i].EffortEnum) {
 			t.Errorf("model %d = %+v, want %+v", i, got[i], want[i])
 		}

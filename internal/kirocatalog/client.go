@@ -36,6 +36,9 @@ type Model struct {
 	// EffortEnum lists accepted output_config.effort values, low → high. Empty
 	// when the model does not advertise an effort schema.
 	EffortEnum []string
+	// RateMultiplier is the credit cost relative to the base rate; 0 when the
+	// catalog does not advertise one.
+	RateMultiplier float64
 }
 
 // Request carries the credential and routing inputs for a catalog fetch.
@@ -90,8 +93,9 @@ func (c *Client) endpointURL(region string) string {
 //	additionalModelRequestFieldsSchema.properties.output_config.properties.effort.enum
 type listResponse struct {
 	Models []struct {
-		ModelID     string `json:"modelId"`
-		TokenLimits struct {
+		ModelID        string  `json:"modelId"`
+		RateMultiplier float64 `json:"rateMultiplier"`
+		TokenLimits    struct {
 			MaxInputTokens  int `json:"maxInputTokens"`
 			MaxOutputTokens int `json:"maxOutputTokens"`
 		} `json:"tokenLimits"`
@@ -168,6 +172,7 @@ func (c *Client) List(ctx context.Context, r Request) ([]Model, error) {
 			MaxInputTokens:  m.TokenLimits.MaxInputTokens,
 			MaxOutputTokens: m.TokenLimits.MaxOutputTokens,
 			EffortEnum:      m.Schema.Properties.OutputConfig.Properties.Effort.Enum,
+			RateMultiplier:  m.RateMultiplier,
 		})
 	}
 	return out, nil

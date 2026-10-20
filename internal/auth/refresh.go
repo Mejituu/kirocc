@@ -172,7 +172,7 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	}
 
 	if isTokenValid(creds.ExpiresAt) {
-		slog.Info("credentials loaded", "auth_type", creds.AuthType, "region", creds.Region)
+		slog.Info("credentials loaded", credentialLogAttrs(creds)...)
 		m.mu.Lock()
 		m.cached = creds
 		m.mu.Unlock()
@@ -201,8 +201,6 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 		return nil, fmt.Errorf("token refresh: %w", err)
 	}
 
-	slog.Info("token refreshed", "auth_type", creds.AuthType)
-
 	// Carry over fields not returned by the refresh endpoint.
 	refreshed.Region = creds.Region
 	refreshed.SSORegion = creds.SSORegion
@@ -212,6 +210,8 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	if refreshed.ProfileARN == "" {
 		refreshed.ProfileARN = creds.ProfileARN
 	}
+
+	slog.Info("token refreshed", credentialLogAttrs(refreshed)...)
 
 	m.mu.Lock()
 	m.cached = refreshed
@@ -324,4 +324,20 @@ func (m *AuthManager) refreshSocialToken(ctx context.Context, creds *Credentials
 		ExpiresAt:    time.Now().Unix() + result.ExpiresIn,
 		ProfileARN:   result.ProfileArn,
 	}, nil
+}
+
+// credentialLogAttrs describes a loaded credential for the startup log: which
+// profile it belongs to, where requests go and when the token lapses.
+func credentialLogAttrs(creds *Credentials) []any {
+	attrs := []any{"auth_type", creds.AuthType, "region", creds.Region}
+	if creds.SSORegion != "" && creds.SSORegion != creds.Region {
+		attrs = append(attrs, "sso_region", creds.SSORegion)
+	}
+	if creds.ProfileARN != "" {
+		attrs = append(attrs, "profile_arn", creds.ProfileARN)
+	}
+	if creds.ExpiresAt > 0 {
+		attrs = append(attrs, "token_expires_at", time.Unix(creds.ExpiresAt, 0).Format(time.DateTime))
+	}
+	return attrs
 }

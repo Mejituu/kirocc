@@ -12,6 +12,7 @@ const (
 	ErrTypeAPI            = "api_error"
 	ErrTypeAuthentication = "authentication_error"
 	ErrTypeStream         = "stream_error"
+	ErrTypeBilling        = "billing_error"
 )
 
 // WriteError writes an Anthropic-compatible JSON error response.

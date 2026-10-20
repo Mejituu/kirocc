@@ -153,9 +153,9 @@ func (o *serverToolOrchestrator) handleStreaming(ctx context.Context, session *s
 		apiResp, err := o.service.client.GenerateAssistantResponse(ctx, o.creds.AccessToken, payload, o.creds.Region)
 		if err != nil {
 			logUpstreamError(ctx, short, err, "round", round+1)
-			final := newStreamFinalError(http.StatusBadGateway, errTypeAPI, "upstream API error")
+			final := o.service.upstreamCallError(ctx, err)
 			_ = session.WriteFinalError(final, func() error {
-				return sw.WriteError(errTypeAPI, "upstream API error")
+				return sw.WriteError(final.sseType, final.sseMessage)
 			})
 			return ""
 		}
@@ -281,7 +281,7 @@ func (o *serverToolOrchestrator) handleStreaming(ctx context.Context, session *s
 				session.Discard()
 				slog.WarnContext(ctx, "empty visible end_turn detected in server tool loop", "trace_id", short)
 				if credits, ok := totals.creditsWith(sw.Credits()); ok {
-					logAbortedAttemptCredits(ctx, short, credits, retryReasonEmptyVisibleEndTurn)
+					o.service.logAbortedAttemptCredits(ctx, short, o.buildOpts.ModelID, credits, retryReasonEmptyVisibleEndTurn)
 				}
 				return retryReasonEmptyVisibleEndTurn
 			}
@@ -293,7 +293,7 @@ func (o *serverToolOrchestrator) handleStreaming(ctx context.Context, session *s
 			in, out := sw.Usage()
 			credits, hasCredits := sw.Credits()
 			totalIn, totalOut, totalCredits, totalHasCredits := totals.withCurrent(in, out, credits, hasCredits)
-			logResponseStats(ctx, short, totalIn, totalOut, sw.HasContextUsage(), sw.ContextUsagePercentage(), o.contextWindowSize, totalCredits, totalHasCredits)
+			o.service.logResponseStats(ctx, short, o.buildOpts.ModelID, totalIn, totalOut, sw.HasContextUsage(), sw.ContextUsagePercentage(), o.contextWindowSize, totalCredits, totalHasCredits)
 			return ""
 		}
 
@@ -400,7 +400,7 @@ func (o *serverToolOrchestrator) handleStreaming(ctx context.Context, session *s
 	in, out := sw.Usage()
 	credits, hasCredits := sw.Credits()
 	totalIn, totalOut, totalCredits, totalHasCredits := totals.withCurrent(in, out, credits, hasCredits)
-	logResponseStats(ctx, short, totalIn, totalOut, sw.HasContextUsage(), sw.ContextUsagePercentage(), o.contextWindowSize, totalCredits, totalHasCredits)
+	o.service.logResponseStats(ctx, short, o.buildOpts.ModelID, totalIn, totalOut, sw.HasContextUsage(), sw.ContextUsagePercentage(), o.contextWindowSize, totalCredits, totalHasCredits)
 	return ""
 }
 
@@ -428,7 +428,8 @@ func (o *serverToolOrchestrator) handleNonStreaming(ctx context.Context, w http.
 		apiResp, err := o.service.client.GenerateAssistantResponse(ctx, o.creds.AccessToken, payload, o.creds.Region)
 		if err != nil {
 			logUpstreamError(ctx, short, err, "round", round+1)
-			httpx.WriteError(w, http.StatusBadGateway, errTypeAPI, "upstream API error")
+			final := o.service.upstreamCallError(ctx, err)
+			httpx.WriteError(w, final.status, final.jsonType, final.jsonMessage)
 			return ""
 		}
 
@@ -479,7 +480,7 @@ func (o *serverToolOrchestrator) handleNonStreaming(ctx context.Context, w http.
 			if acc.IsEmptyVisibleEndTurn() {
 				slog.WarnContext(ctx, "empty visible end_turn detected in server tool loop", "trace_id", short)
 				if totals.hasCredits {
-					logAbortedAttemptCredits(ctx, short, totals.credits, retryReasonEmptyVisibleEndTurn)
+					o.service.logAbortedAttemptCredits(ctx, short, o.buildOpts.ModelID, totals.credits, retryReasonEmptyVisibleEndTurn)
 				}
 				return retryReasonEmptyVisibleEndTurn
 			}
@@ -595,7 +596,7 @@ func (o *serverToolOrchestrator) handleNonStreaming(ctx context.Context, w http.
 	}
 	_, _ = w.Write([]byte("\n"))
 
-	logResponseStats(ctx, short, totals.inputTokens, totals.outputTokens, false, 0, o.contextWindowSize, totals.credits, totals.hasCredits)
+	o.service.logResponseStats(ctx, short, o.buildOpts.ModelID, totals.inputTokens, totals.outputTokens, false, 0, o.contextWindowSize, totals.credits, totals.hasCredits)
 	return ""
 }
 

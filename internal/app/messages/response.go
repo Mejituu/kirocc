@@ -150,7 +150,7 @@ func (s *Service) handleStreamingResponse(ctx context.Context, session *streamSe
 		args = append(args, capture.logAttrs()...)
 		slog.WarnContext(ctx, "empty visible end_turn detected", args...)
 		if credits, ok := sw.Credits(); ok {
-			logAbortedAttemptCredits(ctx, short, credits, retryReasonEmptyVisibleEndTurn)
+			s.logAbortedAttemptCredits(ctx, short, kiroModel, credits, retryReasonEmptyVisibleEndTurn)
 		}
 		return retryReasonEmptyVisibleEndTurn
 	}
@@ -169,12 +169,12 @@ func (s *Service) handleStreamingResponse(ctx context.Context, session *streamSe
 		)
 		inputTokens, outputTokens := sw.Usage()
 		credits, hasCredits := sw.Credits()
-		logResponseStats(ctx, short, inputTokens, outputTokens, sw.HasContextUsage(), sw.ContextUsagePercentage(), contextWindowSize, credits, hasCredits)
+		s.logResponseStats(ctx, short, kiroModel, inputTokens, outputTokens, sw.HasContextUsage(), sw.ContextUsagePercentage(), contextWindowSize, credits, hasCredits)
 	}
 	return ""
 }
 
-func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.ResponseWriter, apiResp *kiroclient.Response, model string, contextWindowSize int, stopSequences []string, maxTokens int, preCountedInputTokens int, capture *upstreamAttemptCapture, toolNameMap map[string]string) string {
+func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.ResponseWriter, apiResp *kiroclient.Response, kiroModel, model string, contextWindowSize int, stopSequences []string, maxTokens int, preCountedInputTokens int, capture *upstreamAttemptCapture, toolNameMap map[string]string) string {
 	traceID, short := logging.TraceIDs(ctx)
 	acc := respconv.NewNonStreamingAccumulator(contextWindowSize, stopSequences, maxTokens, preCountedInputTokens)
 	acc.SetToolNameMap(toolNameMap)
@@ -237,7 +237,7 @@ func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.Respons
 		args = append(args, capture.logAttrs()...)
 		slog.WarnContext(ctx, "empty visible end_turn detected", args...)
 		if credits, ok := acc.Credits(); ok {
-			logAbortedAttemptCredits(ctx, short, credits, retryReasonEmptyVisibleEndTurn)
+			s.logAbortedAttemptCredits(ctx, short, kiroModel, credits, retryReasonEmptyVisibleEndTurn)
 		}
 		return retryReasonEmptyVisibleEndTurn
 	}
@@ -254,12 +254,13 @@ func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.Respons
 	}
 	_, _ = w.Write([]byte("\n"))
 
-	logResponseStats(ctx, short, stats.InputTokens, stats.OutputTokens, stats.HasContextUsage, stats.ContextUsagePercentage, contextWindowSize, stats.Credits, stats.HasCredits)
+	s.logResponseStats(ctx, short, kiroModel, stats.InputTokens, stats.OutputTokens, stats.HasContextUsage, stats.ContextUsagePercentage, contextWindowSize, stats.Credits, stats.HasCredits)
 	return ""
 }
 
-// logResponseStats logs response completion and warns on context limit exceeded.
-func logResponseStats(ctx context.Context, short string, inputTokens, outputTokens int, hasContextUsage bool, contextUsagePct float64, contextWindowSize int, credits float64, hasCredits bool) {
+// logResponseStats logs response completion, records it in the process usage
+// totals and warns on context limit exceeded.
+func (s *Service) logResponseStats(ctx context.Context, short, model string, inputTokens, outputTokens int, hasContextUsage bool, contextUsagePct float64, contextWindowSize int, credits float64, hasCredits bool) {
 	hasUsage := inputTokens > 0 || outputTokens > 0 || hasContextUsage
 	pct := resolveContextPercent(contextUsagePct, hasContextUsage, inputTokens, contextWindowSize)
 	contextUsage := "unknown"
@@ -274,10 +275,14 @@ func logResponseStats(ctx context.Context, short string, inputTokens, outputToke
 		"output_tokens", outputTokens,
 		"context_usage", contextUsage,
 	}
+	snap := s.usage.Record(model, inputTokens, outputTokens, credits)
 	if hasCredits {
 		rounded := roundCredits(credits)
 		trace.SpanFromContext(ctx).SetAttributes(attribute.Float64("kiro.credits", rounded))
-		args = append(args, "credits", rounded)
+		args = append(args, "credits", rounded, "session_credits", roundCredits(snap.SessionCredits))
+		if snap.HasRemaining {
+			args = append(args, "remaining_est", roundCredits(snap.RemainingEst))
+		}
 	}
 	slog.InfoContext(ctx, "<-- POST /v1/messages", args...)
 	if hasUsage && pct >= 100 {
@@ -292,7 +297,8 @@ func logResponseStats(ctx context.Context, short string, inputTokens, outputToke
 // that the proxy decided to abandon (e.g. empty-visible end_turn that triggers
 // retry). The successful retry's credits flow through logResponseStats normally,
 // so this avoids under-reporting cumulative credit consumption.
-func logAbortedAttemptCredits(ctx context.Context, short string, credits float64, reason string) {
+func (s *Service) logAbortedAttemptCredits(ctx context.Context, short, model string, credits float64, reason string) {
+	s.usage.RecordAborted(model, credits)
 	rounded := roundCredits(credits)
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Float64("kiro.credits.aborted_attempt", rounded))
 	slog.InfoContext(ctx, "upstream attempt credits (aborted)",

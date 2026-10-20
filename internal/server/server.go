@@ -7,6 +7,7 @@ import (
 	messagesapp "github.com/d-kuro/kirocc/internal/app/messages"
 	"github.com/d-kuro/kirocc/internal/config"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
+	"github.com/d-kuro/kirocc/internal/kirousage"
 	"github.com/d-kuro/kirocc/internal/tracing"
 	"github.com/d-kuro/kirocc/internal/websearch"
 )
@@ -54,6 +55,12 @@ func WithPromoteOnThinking(enabled bool) ServerOption {
 	return func(s *Server) { s.promoteOnThinking = enabled }
 }
 
+// WithUsageMonitor shares the process usage monitor with the messages service
+// so responses update the running credit totals.
+func WithUsageMonitor(m *kirousage.Monitor) ServerOption {
+	return func(s *Server) { s.usage = m }
+}
+
 // Server is the HTTP server for the kirocc proxy.
 type Server struct {
 	apiKey              string
@@ -65,6 +72,7 @@ type Server struct {
 	maxRequestBody      int64
 	webSearch           websearch.Provider
 	webSearchMaxResults int
+	usage               *kirousage.Monitor
 	mux                 *http.ServeMux
 	messages            *messagesapp.Service
 }
@@ -85,6 +93,7 @@ func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Clien
 		messagesapp.WithPromoteOnThinking(s.promoteOnThinking),
 		messagesapp.WithMaxRequestBody(s.maxRequestBody),
 		messagesapp.WithWebSearch(s.webSearch, s.webSearchMaxResults),
+		messagesapp.WithUsageMonitor(s.usage),
 	)
 	s.registerRoutes()
 	return s

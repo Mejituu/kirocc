@@ -298,7 +298,8 @@ func (c *HTTPClient) GenerateAssistantResponse(ctx context.Context, token string
 				exType := resolveAWSException(errBody, resp.Header)
 				// Retry transient AWS exceptions (throttling / internal / 5xx-equivalent)
 				// even though the HTTP status is 200.
-				if attempt < maxAttempts-1 && isRetryableAWSException(exType) {
+				_, quota := QuotaReason(resp.StatusCode, exType, errBody)
+				if attempt < maxAttempts-1 && isRetryableAWSException(exType) && !quota {
 					delay := backoffDelay(attempt)
 					slog.WarnContext(ctx, "kiro: 200 with non-eventstream exception, retrying",
 						"trace_id", short, "content_type", ct, "exception", exType,
@@ -346,7 +347,11 @@ func (c *HTTPClient) GenerateAssistantResponse(ctx context.Context, token string
 
 		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
 			errBody := readLimitedBody(resp.Body, upstreamBodyLimit)
-			if attempt < maxAttempts-1 {
+			exType := resolveAWSException(errBody, resp.Header)
+			// A quota refusal will not clear within the backoff window, so
+			// retrying only delays the error and burns attempts.
+			_, quota := QuotaReason(resp.StatusCode, exType, errBody)
+			if attempt < maxAttempts-1 && !quota {
 				delay := backoffDelay(attempt)
 				slog.WarnContext(ctx, "kiro: upstream error, retrying",
 					"trace_id", short, "status", resp.StatusCode,
@@ -360,7 +365,7 @@ func (c *HTTPClient) GenerateAssistantResponse(ctx context.Context, token string
 			ue := &UpstreamError{
 				Status:      resp.StatusCode,
 				ContentType: resp.Header.Get("Content-Type"),
-				Exception:   resolveAWSException(errBody, resp.Header),
+				Exception:   exType,
 				Body:        errBody,
 			}
 			c.recordError(ctx, ue)

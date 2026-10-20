@@ -36,10 +36,11 @@ func (s *Service) callAndHandle(ctx context.Context, w http.ResponseWriter, sess
 	apiResp, err := s.client.GenerateAssistantResponse(ctx, inv.creds.AccessToken, inv.payload, inv.creds.Region)
 	if err != nil {
 		logUpstreamError(ctx, short, err)
+		final := s.upstreamCallError(ctx, err)
 		if session != nil {
-			_ = session.WriteFinalError(newStreamFinalError(http.StatusBadGateway, errTypeAPI, "upstream API error"), nil)
+			_ = session.WriteFinalError(final, nil)
 		} else {
-			httpx.WriteError(w, http.StatusBadGateway, errTypeAPI, "upstream API error")
+			httpx.WriteError(w, final.status, final.jsonType, final.jsonMessage)
 		}
 		return ""
 	}
@@ -53,7 +54,7 @@ func (s *Service) callAndHandle(ctx context.Context, w http.ResponseWriter, sess
 	if inv.req.Stream {
 		reason = s.handleStreamingResponse(ctx, session, apiResp, inv.model, inv.responseModel, inv.contextWindowSize, inv.req.StopSequences, inv.req.MaxTokens, apiResp.PromptTokens, capture, inv.toolNameMap)
 	} else {
-		reason = s.handleNonStreamingResponse(ctx, w, apiResp, inv.responseModel, inv.contextWindowSize, inv.req.StopSequences, inv.req.MaxTokens, apiResp.PromptTokens, capture, inv.toolNameMap)
+		reason = s.handleNonStreamingResponse(ctx, w, apiResp, inv.model, inv.responseModel, inv.contextWindowSize, inv.req.StopSequences, inv.req.MaxTokens, apiResp.PromptTokens, capture, inv.toolNameMap)
 	}
 	if reason == retryReasonEmptyVisibleEndTurn {
 		capture.logCapture(ctx, reason)

@@ -16,6 +16,7 @@ const (
 	errTypeAPI            = httpx.ErrTypeAPI
 	ErrTypeAuthentication = httpx.ErrTypeAuthentication
 	errTypeStreamError    = httpx.ErrTypeStream
+	errTypeBilling        = httpx.ErrTypeBilling
 )
 
 // retryableInvalidStateReasons are invalidStateEvent reasons that can be resolved
@@ -91,4 +92,17 @@ func logUpstreamError(ctx context.Context, short string, err error, extra ...any
 		)
 	}
 	slog.ErrorContext(ctx, "kiro api error", attrs...)
+}
+
+// upstreamCallError maps a failed upstream call to the error sent to the
+// client. A credit-quota refusal becomes a 402 billing_error naming the plan
+// and reset time, so the client stops retrying and the user learns why;
+// everything else stays a generic 502.
+func (s *Service) upstreamCallError(ctx context.Context, err error) streamFinalError {
+	if ue, ok := errors.AsType[*kiroclient.UpstreamError](err); ok {
+		if reason, quota := kiroclient.QuotaReason(ue.Status, ue.Exception, ue.Body); quota {
+			return newStreamFinalError(http.StatusPaymentRequired, errTypeBilling, s.usage.QuotaExhausted(ctx, reason))
+		}
+	}
+	return newStreamFinalError(http.StatusBadGateway, errTypeAPI, "upstream API error")
 }

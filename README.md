@@ -13,6 +13,7 @@ Just set `ANTHROPIC_BASE_URL` from any Anthropic API client (e.g., Claude Code) 
 - **Kiro API key authentication** — Alternatively authenticate with a `KIRO_API_KEY` (`ksk_…`) for headless environments (CI, containers) where an interactive Kiro login is not available
 - **Model mapping** — Maps Anthropic model names (e.g., `claude-sonnet-4-6`) to Kiro model names. Customizable via environment variable
 - **Automatic model discovery** — Fetches Kiro's model catalog (`ListAvailableModels`) at startup, so models Kiro launches after a kirocc release resolve with the right context window and effort levels without a code change. Built-in mappings always win; discovery only fills gaps
+- **Account usage reporting** — Logs the plan, credits used / limit / remaining, reset time, free-trial and bonus grants and per-model credit multipliers at startup; a running credit total per response; a per-model session summary on shutdown; and a clear `402 billing_error` (no retry) when the quota is exhausted. See [Account usage reporting](#account-usage-reporting)
 - **Custom API region** — Pin the region in `runtime.<region>.kiro.dev` with `-kiro-api-region`, for accounts whose stored credential region is not one Kiro serves
 - **Extended Thinking** — Enable via the `[1m]` suffix, the `thinking` field, or `output_config.effort`. Reasoning depth travels natively as `additionalModelRequestFields.output_config.effort` (validated against each model's enum; defaults to `medium` for effort-capable models when thinking is on without an explicit effort)
 - **Tool Search** — Proxy-side implementation of Anthropic's [Tool Search Tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool). Supports `tool_search_tool_regex_20251119` and `tool_search_tool_bm25_20251119` with `defer_loading` for on-demand tool discovery
@@ -198,6 +199,57 @@ WRN model discovery failed, using built-in model table region=ap-southeast-1 err
 ```
 
 Disable it with `-model-discovery=false`.
+
+The same step logs each model's credit multiplier as advertised by the catalog:
+
+```
+INF model rates auto=1x claude-opus-4.7=2.2x claude-sonnet-4.6=1.3x claude-haiku-4.5=0.4x ...
+```
+
+### Account usage reporting
+
+kirocc reports the Kiro account's credit position in its log, with no extra command or endpoint. It needs a credential with a profile ARN (Kiro CLI social or IDC login); with `-kiro-api-key` it reports only the process totals.
+
+At startup, alongside model discovery, it calls `GetUsageLimits` on the same control plane (`management.<region>.kiro.dev`):
+
+```
+INF credentials loaded auth_type=idc region=us-east-1 profile_arn=arn:aws:codewhisperer:us-east-1:123456789012:profile/ABCD token_expires_at="2026-10-20 11:21:31"
+INF usage plan="KIRO PRO+" used=1234.56 limit=2500 remaining=1265.44 used_pct=49.4% resets_at="2026-11-01 08:00:00" email=dev@example.com
+INF usage breakdown kind=base used=1200 limit=2000
+INF usage breakdown kind=free_trial status=ACTIVE used=34.56 limit=500 expires_at="2026-10-31 08:00:00"
+INF usage breakdown kind=bonus status=EXPIRED used=0 limit=100
+INF usage overage status=DISABLED overages=0
+```
+
+When the stored token had expired, the same account fields appear on the `token refreshed` line instead of `credentials loaded`. Either line also carries `sso_region` when the token was issued in a different region from the API region.
+
+| Field | Meaning |
+| --- | --- |
+| `plan` | Subscription title |
+| `email` | Account email, when upstream returns it |
+| `used` / `limit` / `remaining` / `used_pct` | Credits this cycle, across the plan allowance plus active free-trial and bonus grants |
+| `resets_at` | When the monthly allowance resets (local time) |
+| `usage breakdown` | Per-component lines, logged only when the account has a free trial or bonuses; `expires_at` is when the free trial lapses |
+| `usage overage` | Pay-as-you-go status and amount beyond the limit, when the account reports it |
+
+Optional fields (`plan`, `email`, `used_pct`, `resets_at`, `expires_at`) are omitted when upstream does not return them.
+
+Each response line that reports credits then carries the process running total and, when the startup query succeeded, an estimate of what is left (the startup `remaining` minus credits this process has spent since; usage from other clients on the same account is not reflected until kirocc restarts):
+
+```
+INF <-- POST /v1/messages ... credits=1.234 session_credits=15.678 remaining_est=1249.762
+```
+
+On shutdown (SIGINT / `Ctrl+C` or SIGTERM), totals for the session, overall and per model, once any request has completed:
+
+```
+INF session usage requests=42 credits=123.456 input_tokens=812345 output_tokens=45678
+INF session usage model=claude-opus-4.7 requests=30 credits=100.12 input_tokens=... output_tokens=...
+```
+
+When upstream refuses a request because the quota is exhausted (HTTP 402, or a throttling error naming `MONTHLY_REQUEST_COUNT` / `DAILY_REQUEST_COUNT`), kirocc does not retry it. It returns `402 billing_error` to the client (or a `billing_error` SSE event once a stream has started) and logs `WRN kiro quota exhausted`. When the startup query succeeded, the message names the plan and, unless the daily cap was hit, the reset time; a daily-cap refusal carries no reset time, since the reported reset date is the monthly one. A refusal triggers no further upstream call.
+
+A failed usage query costs one `WRN usage query failed` line and nothing else.
 
 ### OpenTelemetry tracing
 

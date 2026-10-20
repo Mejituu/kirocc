@@ -7,6 +7,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/auth"
 	"github.com/d-kuro/kirocc/internal/config"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
+	"github.com/d-kuro/kirocc/internal/kirousage"
 	"github.com/d-kuro/kirocc/internal/websearch"
 )
 
@@ -28,6 +29,9 @@ type Service struct {
 	// refused rather than answered without the search.
 	webSearch           websearch.Provider
 	webSearchMaxResults int
+	// usage accumulates per-process credit consumption and holds the last
+	// known account limits for per-request and quota-exhausted reporting.
+	usage *kirousage.Monitor
 }
 
 // Option configures a Service.
@@ -69,12 +73,24 @@ func WithMaxRequestBody(limit int64) Option {
 	return func(s *Service) { s.maxRequestBody = limit }
 }
 
+// WithUsageMonitor shares a usage monitor with the caller, which owns fetching
+// the account limits and logging the shutdown summary. Without it the service
+// keeps a private monitor that only tracks process totals.
+func WithUsageMonitor(m *kirousage.Monitor) Option {
+	return func(s *Service) {
+		if m != nil {
+			s.usage = m
+		}
+	}
+}
+
 // New constructs a message service.
 func New(authMgr TokenGetter, client kiroclient.Client, opts ...Option) *Service {
 	s := &Service{
 		auth:           authMgr,
 		client:         client,
 		maxRequestBody: config.DefaultMaxRequestBody,
+		usage:          kirousage.NewMonitor(),
 	}
 	for _, opt := range opts {
 		opt(s)

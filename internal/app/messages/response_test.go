@@ -43,7 +43,7 @@ func findRecord(t *testing.T, buf *bytes.Buffer, body string) map[string]any {
 
 func TestLogResponseStats_IncludesCredits(t *testing.T) {
 	buf := captureSlog(t)
-	logResponseStats(t.Context(), "abc123", 100, 50, true, 5.0, 200000, 0.19354654693200665, true)
+	New(nil, nil).logResponseStats(t.Context(), "abc123", "claude-sonnet-4.6", 100, 50, true, 5.0, 200000, 0.19354654693200665, true)
 
 	rec := findRecord(t, buf, "<-- POST /v1/messages")
 	attrs, ok := rec["attributes"].(map[string]any)
@@ -61,7 +61,7 @@ func TestLogResponseStats_IncludesCredits(t *testing.T) {
 
 func TestLogResponseStats_OmitsCreditsWhenAbsent(t *testing.T) {
 	buf := captureSlog(t)
-	logResponseStats(t.Context(), "abc123", 100, 50, true, 5.0, 200000, 0, false)
+	New(nil, nil).logResponseStats(t.Context(), "abc123", "claude-sonnet-4.6", 100, 50, true, 5.0, 200000, 0, false)
 
 	rec := findRecord(t, buf, "<-- POST /v1/messages")
 	attrs, ok := rec["attributes"].(map[string]any)
@@ -94,7 +94,7 @@ func TestRoundCredits(t *testing.T) {
 
 func TestLogAbortedAttemptCredits(t *testing.T) {
 	buf := captureSlog(t)
-	logAbortedAttemptCredits(t.Context(), "abc123", 0.12345, retryReasonEmptyVisibleEndTurn)
+	New(nil, nil).logAbortedAttemptCredits(t.Context(), "abc123", "claude-sonnet-4.6", 0.12345, retryReasonEmptyVisibleEndTurn)
 
 	rec := findRecord(t, buf, "upstream attempt credits (aborted)")
 	attrs, ok := rec["attributes"].(map[string]any)
@@ -106,5 +106,22 @@ func TestLogAbortedAttemptCredits(t *testing.T) {
 	}
 	if attrs["reason"] != retryReasonEmptyVisibleEndTurn {
 		t.Fatalf("reason = %v, want %q", attrs["reason"], retryReasonEmptyVisibleEndTurn)
+	}
+}
+
+func TestLogResponseStats_RunningTotals(t *testing.T) {
+	buf := captureSlog(t)
+	s := New(nil, nil)
+	s.logResponseStats(t.Context(), "abc123", "claude-sonnet-4.6", 100, 50, true, 5.0, 200000, 1.25, true)
+	s.logAbortedAttemptCredits(t.Context(), "abc123", "claude-sonnet-4.6", 0.5, retryReasonEmptyVisibleEndTurn)
+	buf.Reset()
+	s.logResponseStats(t.Context(), "abc123", "claude-sonnet-4.6", 100, 50, true, 5.0, 200000, 2, true)
+
+	attrs, _ := findRecord(t, buf, "<-- POST /v1/messages")["attributes"].(map[string]any)
+	if attrs["session_credits"] != 3.75 {
+		t.Fatalf("session_credits = %v, want 3.75 (aborted attempt included); attrs=%v", attrs["session_credits"], attrs)
+	}
+	if _, present := attrs["remaining_est"]; present {
+		t.Fatalf("remaining_est must be omitted before limits are known; attrs=%v", attrs)
 	}
 }

@@ -104,3 +104,31 @@ func isEventStreamContentType(ct string) bool {
 	}
 	return strings.EqualFold(mt, want)
 }
+
+// Throttling reasons Kiro attaches to a credit-quota refusal (kiro-cli's
+// ThrottlingError reason enum). INSUFFICIENT_MODEL_CAPACITY shares the enum
+// but is transient and stays retryable.
+const (
+	ReasonMonthlyRequestCount = "MONTHLY_REQUEST_COUNT"
+	ReasonDailyRequestCount   = "DAILY_REQUEST_COUNT"
+)
+
+// QuotaReason reports whether an upstream error response is a credit-quota
+// refusal and, if so, which cap was hit. Kiro signals it as HTTP 402 or as a
+// ThrottlingException carrying a request-count reason. Only the structured
+// "reason" field is consulted, and only on those responses, so an error body
+// that merely echoes request text containing the enum name is not mistaken
+// for one; plain rate limiting (no such reason) stays retryable.
+func QuotaReason(status int, exception, body string) (string, bool) {
+	if status != http.StatusPaymentRequired && exception != "ThrottlingException" {
+		return "", false
+	}
+	var m struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal([]byte(body), &m)
+	if m.Reason == ReasonMonthlyRequestCount || m.Reason == ReasonDailyRequestCount {
+		return m.Reason, true
+	}
+	return "", status == http.StatusPaymentRequired
+}

@@ -709,3 +709,70 @@ func TestRetryWait_ContextCancelled(t *testing.T) {
 		t.Fatal("expected context error")
 	}
 }
+
+// A quota refusal will not clear within the backoff window: it must surface on
+// the first attempt, both as a 429 and as a 200-wrapped ThrottlingException.
+func TestHTTPClient_QuotaRefusal_NoRetry(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+	}{
+		{"429", http.StatusTooManyRequests, "application/x-amz-json-1.0"},
+		{"200 with exception envelope", http.StatusOK, "application/json"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var callCount atomic.Int32
+			srv := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				callCount.Add(1)
+				w.Header().Set("Content-Type", tt.contentType)
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(`{"__type":"ThrottlingException","message":"quota","reason":"MONTHLY_REQUEST_COUNT"}`))
+			}))
+			defer srv.Close()
+
+			c := NewHTTPClient(WithBaseURL(srv.URL))
+			payload := &kiroproto.Payload{ConversationState: kiroproto.ConversationState{AgentTaskType: "vibe", ChatTriggerType: "MANUAL", CurrentMessage: kiroproto.CurrentMessage{UserInputMessage: kiroproto.UserInputMessage{Content: "Hi"}}}}
+			_, err := c.GenerateAssistantResponse(context.Background(), "tok", payload, "us-east-1")
+			ue, ok := errors.AsType[*UpstreamError](err)
+			if !ok {
+				t.Fatalf("err = %v, want *UpstreamError", err)
+			}
+			if !strings.Contains(ue.Body, "MONTHLY_REQUEST_COUNT") {
+				t.Errorf("body = %q, want the quota reason preserved", ue.Body)
+			}
+			if callCount.Load() != 1 {
+				t.Fatalf("quota refusal should not retry, got %d calls", callCount.Load())
+			}
+		})
+	}
+}
+
+func TestQuotaReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		exception  string
+		body       string
+		wantReason string
+		wantQuota  bool
+	}{
+		{"monthly cap via throttling", http.StatusTooManyRequests, "ThrottlingException", `{"__type":"ThrottlingException","reason":"MONTHLY_REQUEST_COUNT"}`, ReasonMonthlyRequestCount, true},
+		{"daily cap", http.StatusTooManyRequests, "ThrottlingException", `{"reason":"DAILY_REQUEST_COUNT"}`, ReasonDailyRequestCount, true},
+		{"bare 402", http.StatusPaymentRequired, "", `{}`, "", true},
+		{"402 with reason", http.StatusPaymentRequired, "", `{"reason":"MONTHLY_REQUEST_COUNT"}`, ReasonMonthlyRequestCount, true},
+		{"plain rate limit stays retryable", http.StatusTooManyRequests, "ThrottlingException", `{"__type":"ThrottlingException","message":"Rate exceeded"}`, "", false},
+		{"model capacity stays retryable", http.StatusTooManyRequests, "ThrottlingException", `{"reason":"INSUFFICIENT_MODEL_CAPACITY"}`, "", false},
+		{"validation error echoing the enum is not a quota refusal", http.StatusBadRequest, "ValidationException", `{"message":"bad input: MONTHLY_REQUEST_COUNT","reason":"MONTHLY_REQUEST_COUNT"}`, "", false},
+		{"server error", http.StatusInternalServerError, "", `oops`, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, quota := QuotaReason(tt.status, tt.exception, tt.body)
+			if reason != tt.wantReason || quota != tt.wantQuota {
+				t.Fatalf("QuotaReason = (%q, %v), want (%q, %v)", reason, quota, tt.wantReason, tt.wantQuota)
+			}
+		})
+	}
+}
