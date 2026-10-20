@@ -68,7 +68,7 @@ var ErrBodyReadIdle = errors.New("kiroclient: body read idle timeout")
 const defaultBodyReadIdleTimeout = 180 * time.Second
 
 // DefaultResponseHeaderTimeout is the default wait for Kiro's response headers.
-const DefaultResponseHeaderTimeout = 30 * time.Second
+const DefaultResponseHeaderTimeout = 60 * time.Second
 
 // HTTPClient is the production implementation of Client.
 type HTTPClient struct {

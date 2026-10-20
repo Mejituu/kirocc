@@ -114,7 +114,7 @@ API keys are available for Kiro Pro, Pro+, Pro Max, and Power subscribers. On gr
 | `-model-discovery`         | `true`                    | Fetch Kiro's model catalog at startup                                                            |
 | `-keepalive-interval`      | `15s`                     | SSE idle keep-alive interval (0 = disabled)                                                      |
 | `-promote-on-thinking`     | `false`                   | Let thinking deltas open the output gate early: reasoning streams progressively; thinking-only turns are no longer retried transparently |
-| `-response-header-timeout` | `30s`                     | Max wait for Kiro response headers (0 = no limit, otherwise >= 1s)                               |
+| `-response-header-timeout` | `60s`                     | Max wait for Kiro response headers (0 = no limit, otherwise >= 1s)                               |
 | `-web-search-provider`     | (none)                    | Run `web_search_20250305` proxy-side via `brave`, `tavily`, `exa` or `custom`; empty disables it |
 | `-web-search-api-key`      | (none)                    | API key for the search provider                                                                  |
 | `-web-search-url`          | (none)                    | Endpoint for `-web-search-provider custom`                                                       |
