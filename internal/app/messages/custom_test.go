@@ -70,7 +70,7 @@ func (c *recordingKiroClient) GenerateAssistantResponse(ctx context.Context, tok
 func newCustomService(t *testing.T, upstreamURL string, countTokens bool) (*Service, *countingAuth) {
 	t.Helper()
 	t.Setenv("KIROCC_MODEL_MAPPINGS", "")
-	path := filepath.Join(t.TempDir(), "mejituu.json")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
 	countField := ""
 	if !countTokens {
 		countField = `"count_tokens":false,`
@@ -137,7 +137,7 @@ func TestHandleMessages_NonCustomModelStillHitsKiroAuth(t *testing.T) {
 
 	// The tripwire client fails the test if reached, so build the service with
 	// a client that records the call instead.
-	path := filepath.Join(t.TempDir(), "mejituu.json")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
 	if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"providers":[{"name":"bailian","base_url":%q,"auth_token":"t","models":["glm-5.3[1m]"]}]}`, upstream.URL)), 0o600); err != nil {
 		t.Fatal(err)
 	}

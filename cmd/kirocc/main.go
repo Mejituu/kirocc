@@ -145,7 +145,7 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.StringVar(&cfg.APIKey, "api-key", "", "optional API key for authentication")
 	fs.StringVar(&cfg.KiroAPIKey, "kiro-api-key", "", "Kiro API key (ksk_...) to use instead of the kiro-cli database credential; also KIRO_API_KEY")
 	fs.StringVar(&cfg.KiroAPIRegion, "kiro-api-region", "", "region for Kiro API endpoints (runtime.<region>.kiro.dev); overrides the credential's region; also KIRO_API_REGION")
-	fs.StringVar(&cfg.ConfigPath, "config", "", "path to the custom provider config (default: mejituu.json next to the executable)")
+	fs.StringVar(&cfg.ConfigPath, "config", "", "path to the custom provider config (default: mejituu.json5 next to the executable)")
 	fs.BoolVar(&cfg.ModelDiscovery, "model-discovery", true, "fetch Kiro's model catalog at startup so new models resolve without a kirocc update; also KIROCC_MODEL_DISCOVERY")
 	fs.StringVar(&cfg.WebSearch.Provider, "web-search-provider", "",
 		"run Claude Code's WebSearch in-proxy via this search API ("+strings.Join(websearch.Providers, "|")+"); empty disables it; also KIROCC_WEB_SEARCH_PROVIDER")

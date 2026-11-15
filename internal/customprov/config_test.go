@@ -24,7 +24,7 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 // writeConfig writes content to a temp config file and returns its path.
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "mejituu.json")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestLoad_ExplicitPathMissing(t *testing.T) {
 }
 
 func TestLoad_DefaultPathMissing(t *testing.T) {
-	// The test binary's directory holds no mejituu.json, so the default
+	// The test binary's directory holds no mejituu.json5, so the default
 	// location resolves to a missing file: custom providers are disabled.
 	reg, err := Load("")
 	if err != nil {
@@ -75,9 +75,9 @@ func TestLoadFile_InvalidJSON(t *testing.T) {
 	path := writeConfig(t, "{not json")
 	_, err := loadFile(path)
 	if err == nil {
-		t.Fatal("expected an error for invalid JSON")
+		t.Fatal("expected an error for invalid JSON5")
 	}
-	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "invalid JSON") {
+	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "invalid JSON5") {
 		t.Errorf("error should name the file and the problem, got: %v", err)
 	}
 }
@@ -168,6 +168,63 @@ func TestLoadFile_ValidationErrors(t *testing.T) {
 	}
 }
 
+func TestLoadFile_JSON5Syntax(t *testing.T) {
+	path := writeConfig(t, `{
+		// Providers whose models are forwarded verbatim.
+		providers: [{
+			name: 'bailian',
+			base_url: 'http://provider.test/',
+			auth_token: 'secret-token',
+			count_tokens: false,
+			models: ['glm-5.3[1m]', 'kimi-k3'], /* trailing comma */
+		}],
+	}`)
+	reg, err := loadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := reg.providers[0]
+	if p.Name != "bailian" || p.BaseURL != "http://provider.test" || p.CountTokens {
+		t.Errorf("provider fields wrong: %+v", p)
+	}
+	if len(p.Models) != 2 {
+		t.Fatalf("models = %v, want 2", p.Models)
+	}
+	if hit, ok := reg.Lookup("claude-kimi-k3"); !ok || hit.BaseModel != "kimi-k3" {
+		t.Errorf("Lookup(claude-kimi-k3) = %+v, %v", hit, ok)
+	}
+}
+
+func TestLoadFile_DecodeErrorLocation(t *testing.T) {
+	t.Run("syntax error after comments and strings", func(t *testing.T) {
+		// The missing colon sits on line 5, after a comment and a
+		// single-quoted string.
+		src := "{\n  // provider list\n  providers: [{\n    name: 'bailian',\n    url 'x',\n  }],\n}"
+		_, err := loadFile(writeConfig(t, src))
+		if err == nil {
+			t.Fatal("expected an error for the missing colon")
+		}
+		if !strings.Contains(err.Error(), "invalid JSON5") || !strings.Contains(err.Error(), "line 5,") {
+			t.Errorf("error should locate the original line 5, got: %v", err)
+		}
+	})
+
+	t.Run("type error keeps the pointer and line", func(t *testing.T) {
+		// count_tokens: 'yes' sits on line 7.
+		src := "{\n  // provider\n  providers: [{\n    name: 'bailian',\n    base_url: 'http://p',\n    auth_token: 't',\n    count_tokens: 'yes',\n    models: ['m'],\n  }],\n}"
+		_, err := loadFile(writeConfig(t, src))
+		if err == nil {
+			t.Fatal("expected an error for the string-typed count_tokens")
+		}
+		if !strings.Contains(err.Error(), "line 7,") {
+			t.Errorf("error should locate the original line 7, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "/providers/0/count_tokens") {
+			t.Errorf("error should keep the JSON pointer, got: %v", err)
+		}
+	})
+}
+
 func TestLoadFile_BaseURLTrailingSlashTrimmed(t *testing.T) {
 	reg, err := loadTestRegistry(t, validConfig)
 	if err != nil {
@@ -206,7 +263,7 @@ func TestLoadFile_CountTokensDefault(t *testing.T) {
 
 func TestLoadFile_PermissionWarning(t *testing.T) {
 	buf := captureSlog(t)
-	path := filepath.Join(t.TempDir(), "mejituu.json")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
 	if err := os.WriteFile(path, []byte(validConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +318,7 @@ func TestDefaultPathFor_Symlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, want := defaultPathFor(linkPath), filepath.Join(realDir, "mejituu.json")
+	got, want := defaultPathFor(linkPath), filepath.Join(realDir, "mejituu.json5")
 	if got != want {
 		t.Errorf("defaultPathFor(symlink) = %q, want %q", got, want)
 	}

@@ -69,7 +69,7 @@ type Config struct {
 	// third-party search API, so it is opt-in.
 	WebSearch websearch.Config
 	// ConfigPath points at the custom provider config. Empty selects the
-	// default location, mejituu.json next to the executable; a missing default
+	// default location, mejituu.json5 next to the executable; a missing default
 	// file disables custom providers while an explicit path must exist.
 	ConfigPath string
 }

@@ -20,7 +20,7 @@ import (
 )
 
 // configFileName is the file looked up next to the executable by default.
-const configFileName = "mejituu.json"
+const configFileName = "mejituu.json5"
 
 // providerConfig is one entry of the config file's "providers" array.
 type providerConfig struct {
@@ -55,10 +55,10 @@ type mappingTarget struct {
 }
 
 // Load reads the custom provider config. An empty path selects the default
-// location, mejituu.json next to the real executable; a default-location file
-// that does not exist disables custom providers, while an explicitly given
-// path must exist. The returned registry is nil when custom providers are
-// disabled.
+// location, mejituu.json5 next to the real executable; a default-location
+// file that does not exist disables custom providers, while an explicitly
+// given path must exist. The returned registry is nil when custom providers
+// are disabled.
 func Load(path string) (*Registry, error) {
 	if path != "" {
 		return loadFile(path)
@@ -113,9 +113,15 @@ func loadFile(path string) (*Registry, error) {
 		slog.Warn("custom provider config is readable by group or others; run chmod 600",
 			"path", path, "mode", perm.String())
 	}
+	doc, err := convertJSON5(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid JSON5: %w", path, err)
+	}
 	var fc fileConfig
-	if err := json.Unmarshal(raw, &fc); err != nil {
-		return nil, fmt.Errorf("%s: invalid JSON: %w", path, err)
+	if err := json.Unmarshal(doc.json, &fc); err != nil {
+		// Decoding errors carry offsets into the converted text; the offset
+		// table locates them in the original file.
+		return nil, fmt.Errorf("%s: invalid JSON5: %s", path, locateJSON5Error(doc, err))
 	}
 	registry, err := buildRegistry(path, fc)
 	if err != nil {

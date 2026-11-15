@@ -53,7 +53,7 @@ func mappingUpstream(t *testing.T) (*httptest.Server, func() [][2]string) {
 func newMappingService(t *testing.T, upstreamURL, mappings string, client kiroclient.Client) (*Service, *countingAuth) {
 	t.Helper()
 	t.Setenv("KIROCC_MODEL_MAPPINGS", "")
-	path := filepath.Join(t.TempDir(), "mejituu.json")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
 	content := fmt.Sprintf(`{"providers":[{"name":"bailian","base_url":%q,"auth_token":"secret-token","models":["glm-5.3[1m]","deepseek-v4.1-flash-1017"]}],"mappings":%s}`, upstreamURL, mappings)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)

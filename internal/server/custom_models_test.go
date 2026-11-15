@@ -13,7 +13,7 @@ import (
 )
 
 func TestGetModels_CustomProviderModels(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mejituu.json")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
 	if err := os.WriteFile(path, []byte(`{
 		"providers": [{
 			"name": "bailian",
