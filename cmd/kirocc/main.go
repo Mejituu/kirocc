@@ -17,6 +17,7 @@ import (
 
 	"github.com/d-kuro/kirocc/internal/auth"
 	"github.com/d-kuro/kirocc/internal/config"
+	"github.com/d-kuro/kirocc/internal/customprov"
 	"github.com/d-kuro/kirocc/internal/kirocatalog"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
 	"github.com/d-kuro/kirocc/internal/kirousage"
@@ -88,7 +89,17 @@ func run(ctx context.Context, args []string) error {
 
 	kiroClient := buildKiroClient(authMgr, cfg)
 	usage := kirousage.NewMonitor()
-	srv := buildServer(authMgr, kiroClient, cfg, webSearch, usage)
+	// Loaded after flags and env so an invalid file fails startup loudly.
+	// A missing default-location file just disables the routing.
+	customReg, err := customprov.Load(cfg.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("custom provider config: %w", err)
+	}
+	var customProxy *customprov.Proxy
+	if customReg != nil {
+		customProxy = customprov.NewProxy(customReg, cfg.ResponseHeaderTimeout)
+	}
+	srv := buildServer(authMgr, kiroClient, cfg, webSearch, usage, customProxy)
 
 	if cfg.ModelDiscovery {
 		go discoverModels(ctx, authMgr, cfg.KiroAPIRegion)
@@ -134,6 +145,7 @@ func parseFlags(args []string) (config.Config, error) {
 	fs.StringVar(&cfg.APIKey, "api-key", "", "optional API key for authentication")
 	fs.StringVar(&cfg.KiroAPIKey, "kiro-api-key", "", "Kiro API key (ksk_...) to use instead of the kiro-cli database credential; also KIRO_API_KEY")
 	fs.StringVar(&cfg.KiroAPIRegion, "kiro-api-region", "", "region for Kiro API endpoints (runtime.<region>.kiro.dev); overrides the credential's region; also KIRO_API_REGION")
+	fs.StringVar(&cfg.ConfigPath, "config", "", "path to the custom provider config (default: mejituu.json next to the executable)")
 	fs.BoolVar(&cfg.ModelDiscovery, "model-discovery", true, "fetch Kiro's model catalog at startup so new models resolve without a kirocc update; also KIROCC_MODEL_DISCOVERY")
 	fs.StringVar(&cfg.WebSearch.Provider, "web-search-provider", "",
 		"run Claude Code's WebSearch in-proxy via this search API ("+strings.Join(websearch.Providers, "|")+"); empty disables it; also KIROCC_WEB_SEARCH_PROVIDER")
@@ -297,12 +309,13 @@ func reportUsage(ctx context.Context, authMgr *auth.AuthManager, regionOverride 
 	}
 }
 
-func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config.Config, webSearch websearch.Provider, usage *kirousage.Monitor) *server.Server {
+func buildServer(authMgr *auth.AuthManager, client kiroclient.Client, cfg config.Config, webSearch websearch.Provider, usage *kirousage.Monitor, customProxy *customprov.Proxy) *server.Server {
 	opts := []server.ServerOption{
 		server.WithUsageMonitor(usage),
 		server.WithKeepAliveInterval(cfg.KeepAliveInterval),
 		server.WithPromoteOnThinking(cfg.PromoteOnThinking),
 		server.WithMaxRequestBody(cfg.MaxRequestBody),
+		server.WithCustomProviders(customProxy),
 	}
 	if webSearch != nil {
 		opts = append(opts, server.WithWebSearch(webSearch, cfg.WebSearch.MaxResults))

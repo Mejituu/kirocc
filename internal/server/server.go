@@ -6,6 +6,7 @@ import (
 
 	messagesapp "github.com/d-kuro/kirocc/internal/app/messages"
 	"github.com/d-kuro/kirocc/internal/config"
+	"github.com/d-kuro/kirocc/internal/customprov"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
 	"github.com/d-kuro/kirocc/internal/kirousage"
 	"github.com/d-kuro/kirocc/internal/tracing"
@@ -61,6 +62,13 @@ func WithUsageMonitor(m *kirousage.Monitor) ServerOption {
 	return func(s *Server) { s.usage = m }
 }
 
+// WithCustomProviders routes models declared in the custom provider config to
+// their provider and advertises them in /v1/models. A nil proxy disables the
+// routing.
+func WithCustomProviders(p *customprov.Proxy) ServerOption {
+	return func(s *Server) { s.custom = p }
+}
+
 // Server is the HTTP server for the kirocc proxy.
 type Server struct {
 	apiKey              string
@@ -75,6 +83,9 @@ type Server struct {
 	usage               *kirousage.Monitor
 	mux                 *http.ServeMux
 	messages            *messagesapp.Service
+	// custom routes user-configured models to Anthropic-compatible providers,
+	// bypassing the Kiro pipeline. Nil disables the routing.
+	custom *customprov.Proxy
 }
 
 // New creates a new Server.
@@ -94,6 +105,7 @@ func New(authMgr messagesapp.TokenGetter, apiKey string, client kiroclient.Clien
 		messagesapp.WithMaxRequestBody(s.maxRequestBody),
 		messagesapp.WithWebSearch(s.webSearch, s.webSearchMaxResults),
 		messagesapp.WithUsageMonitor(s.usage),
+		messagesapp.WithCustomProviders(s.custom),
 	)
 	s.registerRoutes()
 	return s

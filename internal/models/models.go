@@ -393,6 +393,27 @@ func routes1M(model string) bool {
 	return contextWindowSize == ThinkingContextWindowSize
 }
 
+// HasAnthropicID reports whether id exactly matches the Anthropic ID of a
+// built-in mapping or a KIROCC_MODEL_MAPPINGS override. Discovered catalog
+// entries are deliberately excluded: the question is whether the ID collides
+// with a name kirocc itself answers, not whether it happens to resolve.
+func HasAnthropicID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, m := range envMappings() {
+		if m.Anthropic == id {
+			return true
+		}
+	}
+	for _, m := range modelMapOrdered {
+		if m.Anthropic == id {
+			return true
+		}
+	}
+	return false
+}
+
 // ModelInfo is one entry served by /v1/models.
 type ModelInfo struct {
 	ID          string

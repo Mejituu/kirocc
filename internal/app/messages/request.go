@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	"github.com/d-kuro/kirocc/internal/anthropic"
+	"github.com/d-kuro/kirocc/internal/customprov"
 	"github.com/d-kuro/kirocc/internal/httpx"
 	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/reqconv"
@@ -19,6 +20,10 @@ import (
 
 // HandleCountTokens serves POST /v1/messages/count_tokens.
 func (s *Service) HandleCountTokens(w http.ResponseWriter, r *http.Request) {
+	if s.maybeForwardCustom(r.Context(), w, r, customprov.EndpointCountTokens) {
+		return
+	}
+
 	req, err := parseAndValidateRequest(r.Context(), w, r, s.maxRequestBody)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())

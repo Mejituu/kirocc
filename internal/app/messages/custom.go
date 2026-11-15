@@ -1,0 +1,139 @@
+package messages
+
+import (
+	"bytes"
+	"context"
+	"encoding/json/v2"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+
+	"github.com/d-kuro/kirocc/internal/anthropic"
+	"github.com/d-kuro/kirocc/internal/customprov"
+	"github.com/d-kuro/kirocc/internal/httpx"
+	"github.com/d-kuro/kirocc/internal/logging"
+	"github.com/d-kuro/kirocc/internal/reqconv"
+	"github.com/d-kuro/kirocc/internal/tokencount"
+)
+
+// maybeForwardCustom routes a request to a custom provider when its model
+// matches one declared in the custom provider config. It returns true when
+// the request was fully handled; otherwise the request body is restored on r
+// and the caller proceeds down the regular Kiro path.
+//
+// The body is read up front because the custom path forwards the original
+// bytes — decoding into anthropic.Request would drop fields the provider
+// understands. Reading under the same MaxBytesReader cap keeps the
+// over-limit response identical to the regular path's.
+func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter, r *http.Request, endpoint customprov.Endpoint) bool {
+	if s.custom == nil {
+		return false
+	}
+	_, short := logging.TraceIDs(ctx)
+
+	raw, err := readRawRequestBody(w, r, s.maxRequestBody)
+	if err != nil {
+		// HandleMessages distinguishes an over-cap body (413, with a warning
+		// log) from a malformed one (400); HandleCountTokens answers 400 for
+		// both and logs nothing. Keep each endpoint's error behavior exactly
+		// as the regular path has it.
+		if endpoint == customprov.EndpointMessages {
+			if errors.As(err, new(*http.MaxBytesError)) {
+				slog.WarnContext(ctx, "request body too large",
+					"trace_id", short, "limit_bytes", s.maxRequestBody, "content_length", r.ContentLength)
+				httpx.WriteError(w, http.StatusRequestEntityTooLarge, errTypeInvalidRequest,
+					fmt.Sprintf("request body exceeds the %d byte limit; raise -max-request-body (or KIROCC_MAX_REQUEST_BODY) to allow larger requests", s.maxRequestBody))
+				return true
+			}
+			slog.WarnContext(ctx, "invalid request", "trace_id", short, "err", err)
+		}
+		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
+		return true
+	}
+
+	var peek customprov.RequestInfo
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		// Unparseable body: not a custom-model request; the regular path
+		// reports the decode error.
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		return false
+	}
+
+	hit, ok := s.custom.Lookup(peek.Model)
+	if !ok {
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		return false
+	}
+
+	// count_tokens stays local when the provider is configured without it:
+	// providers without a count_tokens endpoint would otherwise turn every
+	// probe into an upstream error.
+	if endpoint == customprov.EndpointCountTokens && !hit.Provider.CountTokens {
+		s.countTokensLocally(ctx, w, r, raw, hit)
+		return true
+	}
+
+	s.custom.Forward(ctx, w, r.Header, raw, hit, peek, endpoint)
+	return true
+}
+
+// readRawRequestBody reads the whole body under the size cap, wrapping read
+// errors the way parseAndValidateRequest does.
+func readRawRequestBody(w http.ResponseWriter, r *http.Request, maxBody int64) ([]byte, error) {
+	if maxBody > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("invalid request: %w", err)
+	}
+	return raw, nil
+}
+
+// countTokensLocally answers count_tokens for a custom model with the local
+// tiktoken estimate. It mirrors HandleCountTokens minus the Kiro parts: the
+// payload is built directly with the provider's model ID, so the count covers
+// the same tool and effort fields as a Kiro estimate. The raw bytes are
+// already in hand and within the size cap, so the request is decoded directly
+// rather than re-fed through parseAndValidateRequest's MaxBytesReader.
+func (s *Service) countTokensLocally(ctx context.Context, w http.ResponseWriter, r *http.Request, raw []byte, hit customprov.Hit) {
+	var req anthropic.Request
+	if err := json.UnmarshalRead(bytes.NewReader(raw), &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
+		return
+	}
+	if len(req.Messages) == 0 {
+		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, "messages must not be empty")
+		return
+	}
+
+	ccSessionID := r.Header.Get(headerCCSessionID)
+
+	thinking := req.IsThinkingEnabled()
+	effort := resolveEffort(ctx, hit.BaseModel, &req, thinking)
+
+	payload, _, err := reqconv.BuildPayload(&req, reqconv.BuildOptions{
+		ModelID:        hit.BaseModel,
+		ConversationID: ccSessionID,
+		Effort:         effort,
+	})
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
+		return
+	}
+
+	n, err := tokencount.CountPayload(payload)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, errTypeAPI, "token counting unavailable")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.MarshalWrite(w, map[string]int{"input_tokens": n}); err != nil {
+		slog.ErrorContext(ctx, "write count_tokens response failed", "err", err)
+		return
+	}
+	_, _ = w.Write([]byte("\n"))
+}

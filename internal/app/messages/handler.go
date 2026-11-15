@@ -10,6 +10,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/advisor"
 	"github.com/d-kuro/kirocc/internal/anthropic"
 	"github.com/d-kuro/kirocc/internal/auth"
+	"github.com/d-kuro/kirocc/internal/customprov"
 	"github.com/d-kuro/kirocc/internal/httpx"
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/models"
@@ -24,6 +25,10 @@ const headerCCSessionID = "X-Claude-Code-Session-Id"
 func (s *Service) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	traceID, short := logging.TraceIDs(ctx)
+
+	if s.maybeForwardCustom(ctx, w, r, customprov.EndpointMessages) {
+		return
+	}
 
 	req, err := parseAndValidateRequest(ctx, w, r, s.maxRequestBody)
 	if err != nil {

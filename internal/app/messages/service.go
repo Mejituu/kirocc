@@ -6,6 +6,7 @@ import (
 
 	"github.com/d-kuro/kirocc/internal/auth"
 	"github.com/d-kuro/kirocc/internal/config"
+	"github.com/d-kuro/kirocc/internal/customprov"
 	"github.com/d-kuro/kirocc/internal/kiroclient"
 	"github.com/d-kuro/kirocc/internal/kirousage"
 	"github.com/d-kuro/kirocc/internal/websearch"
@@ -32,6 +33,10 @@ type Service struct {
 	// usage accumulates per-process credit consumption and holds the last
 	// known account limits for per-request and quota-exhausted reporting.
 	usage *kirousage.Monitor
+	// custom forwards requests for user-configured models to Anthropic-
+	// compatible providers, bypassing the Kiro pipeline entirely. Nil (no
+	// custom provider config) leaves every model on the Kiro path.
+	custom *customprov.Proxy
 }
 
 // Option configures a Service.
@@ -71,6 +76,12 @@ func WithPromoteOnThinking(enabled bool) Option {
 // cap. Defaults to config.DefaultMaxRequestBody when the option is omitted.
 func WithMaxRequestBody(limit int64) Option {
 	return func(s *Service) { s.maxRequestBody = limit }
+}
+
+// WithCustomProviders routes models declared in the custom provider config to
+// their provider. A nil proxy leaves every model on the Kiro path.
+func WithCustomProviders(p *customprov.Proxy) Option {
+	return func(s *Service) { s.custom = p }
 }
 
 // WithUsageMonitor shares a usage monitor with the caller, which owns fetching

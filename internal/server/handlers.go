@@ -28,6 +28,22 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		}
 		data = append(data, entry)
 	}
+	// Custom provider models come after the Kiro entries, one per configured
+	// model, owned by their provider.
+	if s.custom != nil {
+		for _, m := range s.custom.ListModels() {
+			entry := map[string]any{
+				"id":       m.ID,
+				"object":   "model",
+				"created":  now,
+				"owned_by": m.Provider,
+			}
+			if m.DisplayName != "" {
+				entry["display_name"] = m.DisplayName
+			}
+			data = append(data, entry)
+		}
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data":   data,

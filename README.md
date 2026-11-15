@@ -111,6 +111,7 @@ API keys are available for Kiro Pro, Pro+, Pro Max, and Power subscribers. On gr
 | `-api-key`                 | (none)                    | API key required to access the proxy                                                             |
 | `-kiro-api-key`            | (none)                    | Kiro API key (`ksk_…`) to use instead of the Kiro CLI DB credential                              |
 | `-kiro-api-region`         | (credential's region)     | Region for Kiro API endpoints (`runtime.<region>.kiro.dev`)                                      |
+| `-config`                  | `mejituu.json` by binary  | Path to the custom provider config (see [Custom providers](#custom-providers))                   |
 | `-model-discovery`         | `true`                    | Fetch Kiro's model catalog at startup                                                            |
 | `-keepalive-interval`      | `15s`                     | SSE idle keep-alive interval (0 = disabled)                                                      |
 | `-promote-on-thinking`     | `true`                    | Let thinking deltas open the output gate early: reasoning streams progressively; thinking-only turns are no longer retried transparently |
@@ -274,6 +275,36 @@ export KIROCC_MODEL_MAPPINGS='[{"anthropic":"my-model","kiro":"claude-sonnet-4.5
 ```
 
 Optional fields: `kiro_1m` (the SKU a 1M request routes to; set it equal to `kiro` for an always-1M model) and `display_name` (adds the entry to `/v1/models`, so Claude Code's picker lists it — plus a `(1M context)` variant when `kiro_1m` is a separate SKU). An `anthropic` ID may carry the `[1m]` suffix in either case; it is canonicalized to `[1m]`. Because overrides win the lookup, an override that shadows a built-in ID also replaces its `[1m]` entry — the list only advertises a 1M ID when the override can actually deliver it.
+
+### Custom providers
+
+Requests for models from an Anthropic-compatible provider (e.g. Alibaba Bailian's Anthropic endpoint) can bypass the Kiro conversion entirely and be forwarded verbatim. Declare the provider in a `mejituu.json` config file:
+
+```json
+{
+  "providers": [{
+    "name": "bailian",
+    "base_url": "https://llm-xxx.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    "auth_token": "sk-...",
+    "count_tokens": true,
+    "models": ["glm-5.3[1m]", "deepseek-v4.1-flash-1017[1m]", "kimi-k3[1m]", "qwen3.8-max[1m]"]
+  }]
+}
+```
+
+| Field         | Description                                                                                                     |
+| ------------- | --------------------------------------------------------------------------------------------------------------- |
+| `name`        | Provider name, used in logs and as the `owned_by` of its models in `/v1/models`                                 |
+| `base_url`    | The provider's Anthropic-compatible base URL (http/https, no trailing slash required)                           |
+| `auth_token`  | Sent as `Authorization: Bearer <token>`; never appears in kirocc's logs                                         |
+| `count_tokens`| Optional, defaults to `true`: forward `/v1/messages/count_tokens` to the provider instead of estimating locally |
+| `models`      | Model IDs the provider serves; a trailing `[1m]` advertises a 1M context window                                 |
+
+By default the config is read from `mejituu.json` next to the real executable (symlinks such as `~/.local/bin/kirocc → dist/kirocc` resolve to the real file's directory); pass `-config <path>` to point elsewhere (`go run` needs this). A missing default file simply disables the feature; an explicitly given path, invalid JSON, or a validation error fails startup. The file should not be group/world readable (`chmod 600`).
+
+Each configured model is exposed to Claude Code as `claude-<name>` — `glm-5.3[1m]` becomes `claude-glm-5.3[1m]`, listed in the `/model` picker. A request whose model is `claude-glm-5.3` or `claude-glm-5.3[1m]` is routed to that provider with the model name rewritten to `glm-5.3`; every other model keeps going through Kiro. Model names must not collide with built-in kirocc IDs.
+
+For a custom-provider request, kirocc acts as a transparent pipe: the request body is forwarded with only the `model` field rewritten (unknown fields, key order, and number spellings are preserved), and the provider's response — status, headers, body, streaming SSE — is passed through unchanged. Client credentials (`Authorization`, `X-Api-Key`, `Cookie`) are never forwarded; `Content-Type`, `Accept`, `User-Agent`, and `Anthropic-*` headers are. Nothing Kiro-specific runs on this path: no model resolution, no server-side tool emulation (`web_search` etc. must be supported by the provider itself), no usage/credit accounting, no SSE keep-alive.
 
 ## Endpoints
 
