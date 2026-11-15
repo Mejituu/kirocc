@@ -145,6 +145,25 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		)
 	}
 
+	// Usage scanning rides alongside the forwarding as a read-only side
+	// channel, selected by the response's media type: an event stream's
+	// data lines are parsed as they pass, a JSON body is cached whole and
+	// parsed at EOF. Only a success-status JSON body is cached — an error
+	// keeps the small capture for the warning below. count_tokens logs no
+	// completion line, so it does none of this work.
+	var scanner *scanUsage
+	var jsonBody []byte
+	if logPair {
+		switch mediaType(resp.Header.Get("Content-Type")) {
+		case "text/event-stream":
+			scanner = &scanUsage{}
+		case "application/json":
+			if resp.StatusCode < 400 {
+				jsonBody = []byte{}
+			}
+		}
+	}
+
 	// Copy the body as it arrives so SSE events reach the client while the
 	// provider is still generating. A write failure means the client
 	// disconnected; returning lets ctx cancellation close the upstream.
@@ -162,6 +181,12 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		if n > 0 {
 			if errBody != nil && len(errBody) < errBodyLimit {
 				errBody = append(errBody, buf[:min(n, errBodyLimit-len(errBody))]...)
+			}
+			if scanner != nil {
+				scanner.feed(buf[:n])
+			}
+			if jsonBody != nil {
+				jsonBody = append(jsonBody, buf[:n]...)
 			}
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
 				return
@@ -182,10 +207,31 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 
 	// The completion line covers the full body transfer; a read error ends
 	// the transfer without one, like the Kiro path's silent stream errors.
+	// Usage is reported in the line when the response carried it — an error
+	// response generally does not, and then the three fields are simply
+	// absent.
 	if logPair && !readFailed {
+		var usage *observedUsage
+		if scanner != nil && scanner.found {
+			usage = &scanner.usage
+		} else if jsonBody != nil {
+			usage = jsonUsage(jsonBody)
+		}
 		args := appendSessionID(ctx, []any{"trace_id", short})
-		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode, "duration", time.Since(start))
+		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode)
+		var pct float64
+		var contextUsage string
+		if usage != nil {
+			pct = float64(usage.inputTokens) * 100 / float64(contextWindow(hit))
+			contextUsage = fmt.Sprintf("%.1fk(%.1f%%)", float64(usage.inputTokens)/1000, pct)
+			args = append(args, "input_tokens", usage.inputTokens, "output_tokens", usage.outputTokens, "context_usage", contextUsage)
+		}
+		args = append(args, "duration", time.Since(start))
 		slog.InfoContext(ctx, "<-- POST /v1/messages", args...)
+		// Mirror the Kiro path's warning when the context window is full.
+		if pct >= 100 {
+			slog.WarnContext(ctx, "context limit exceeded", "trace_id", short, "context_usage", contextUsage)
+		}
 	}
 	if errBody != nil {
 		args := appendSessionID(ctx, []any{"trace_id", short})
@@ -196,6 +242,14 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 
 // errBodyLimit bounds the response body cached for the error warning.
 const errBodyLimit = 2048
+
+// mediaType extracts the media type of a Content-Type header, before any
+// parameters, so "text/event-stream; charset=utf-8" still selects the SSE
+// scanner.
+func mediaType(contentType string) string {
+	base, _, _ := strings.Cut(contentType, ";")
+	return strings.TrimSpace(base)
+}
 
 // requestLogArgs builds the "--> POST /v1/messages" attributes, mirroring the
 // Kiro path's logRequest fields: shortened trace and session IDs, the

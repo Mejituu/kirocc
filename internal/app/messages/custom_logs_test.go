@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,31 +16,59 @@ import (
 	"github.com/d-kuro/kirocc/internal/logging"
 )
 
+// logBuffer guards the captured log output with a mutex. A recorder-based
+// handler call is synchronous, but a real httptest server logs from its own
+// goroutine, and reading the buffer after the client saw EOF has no
+// happens-before edge the race detector can see — so the buffer itself
+// synchronizes.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *logBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Bytes()
+}
+
 // captureSlogAtLevel redirects slog.Default to a buffer at the given level.
-func captureSlogAtLevel(t *testing.T, level slog.Level) *bytes.Buffer {
+func captureSlogAtLevel(t *testing.T, level slog.Level) *logBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &logBuffer{}
 	old := slog.Default()
-	slog.SetDefault(slog.New(logging.NewOTelHandler(&buf, level)))
+	slog.SetDefault(slog.New(logging.NewOTelHandler(buf, level)))
 	t.Cleanup(func() { slog.SetDefault(old) })
-	return &buf
+	return buf
 }
 
 // captureTint redirects slog.Default to an order-preserving tint handler, so
 // tests can assert attribute order; the OTel handler sorts attributes by key.
 // Colors are off so the raw lines stay greppable.
-func captureTint(t *testing.T, level slog.Level) *bytes.Buffer {
+func captureTint(t *testing.T, level slog.Level) *logBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &logBuffer{}
 	old := slog.Default()
-	slog.SetDefault(slog.New(tint.NewHandler(&buf, &tint.Options{Level: level, NoColor: true})))
+	slog.SetDefault(slog.New(tint.NewHandler(buf, &tint.Options{Level: level, NoColor: true})))
 	t.Cleanup(func() { slog.SetDefault(old) })
-	return &buf
+	return buf
 }
 
 // findLine returns the first raw tint log line carrying the message. tint
 // prints the message unquoted after the level marker.
-func findLine(t *testing.T, buf *bytes.Buffer, msg string) string {
+func findLine(t *testing.T, buf interface{ String() string }, msg string) string {
 	t.Helper()
 	for line := range strings.SplitSeq(buf.String(), "\n") {
 		if strings.Contains(line, msg) {

@@ -22,7 +22,7 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 }
 
 // findRecord scans the buffer for the first JSON-Lines record whose body matches.
-func findRecord(t *testing.T, buf *bytes.Buffer, body string) map[string]any {
+func findRecord(t *testing.T, buf interface{ String() string }, body string) map[string]any {
 	t.Helper()
 	for line := range strings.SplitSeq(buf.String(), "\n") {
 		line = strings.TrimSpace(line)
