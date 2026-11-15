@@ -306,6 +306,29 @@ Each configured model is exposed to Claude Code as `claude-<name>` — `glm-5.3[
 
 For a custom-provider request, kirocc acts as a transparent pipe: the request body is forwarded with only the `model` field rewritten (unknown fields, key order, and number spellings are preserved), and the provider's response — status, headers, body, streaming SSE — is passed through unchanged. Client credentials (`Authorization`, `X-Api-Key`, `Cookie`) are never forwarded; `Content-Type`, `Accept`, `User-Agent`, and `Anthropic-*` headers are. Nothing Kiro-specific runs on this path: no model resolution, no server-side tool emulation (`web_search` etc. must be supported by the provider itself), no usage/credit accounting, no SSE keep-alive.
 
+#### Session-following model mappings
+
+Claude Code's background classifier sends small requests (`model=claude-sonnet-5`, no thinking, non-streaming) under the main conversation's session ID. Mappings let those follow the provider the conversation uses, with the model rewritten per rule:
+
+```json
+{
+  "providers": [ ...as above... ],
+  "mappings": {
+    "kiro": [
+      {"model": "claude-sonnet-5", "thinking": false, "stream": false, "to": {"provider": "kiro", "model": "claude-haiku-5.5"}}
+    ],
+    "bailian": [
+      {"model": "claude-sonnet-5", "thinking": false, "stream": false, "to": {"provider": "bailian", "model": "deepseek-v4.1-flash-1017"}},
+      {"model": "claude-opus-5-5", "to": {"provider": "bailian", "model": "ZHIPU/GLM-5.3"}}
+    ]
+  }
+}
+```
+
+Each mappings group is keyed by the provider the session last used — `kiro`, or a declared provider name (`kiro` is reserved and cannot be a provider name). Within a group, rules match in order and the first hit wins. A rule's `model` is compared with the `[1m]` marker ignored on both sides, case-sensitively otherwise; `thinking` and `stream` are optional filters — omitting one matches either value, and `thinking` only looks at `thinking.type` (the `[1m]` marker never counts as thinking). `to.model` is used verbatim, slashes and case included (`ZHIPU/GLM-5.3`); for a custom provider it must be one of that provider's configured models (checked at startup), while a `kiro` target is checked per request against kirocc's model table.
+
+A session's provider is set by its most recent unmapped `POST /v1/messages` request carrying the `X-Claude-Code-Session-Id` header — custom-model requests record their provider, everything else records `kiro`. Mapped requests never change the session's provider, and a session with no record yet is never mapped. `POST /v1/messages/count_tokens` neither reads nor writes the session table and is never mapped. When a mapping's target turns out unknown, kirocc warns (`model mapping target unknown`) and routes the request normally without touching the session.
+
 ## Endpoints
 
 | Path                             | Description                              |

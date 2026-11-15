@@ -8,12 +8,13 @@ import (
 	"io"
 )
 
-// rewriteModel replaces the value of the top-level "model" member in a JSON
+// RewriteModel replaces the value of the top-level "model" member in a JSON
 // request body, copying every other token verbatim. The body is rewritten
 // token-by-token rather than decoded into a struct and re-marshalled so that
 // key order, unknown fields, and number spellings Claude Code may rely on
-// survive the pass unchanged.
-func rewriteModel(raw []byte, model string) ([]byte, error) {
+// survive the pass unchanged. Exported for the session-following mappings,
+// which rewrite a request bound for the Kiro path.
+func RewriteModel(raw []byte, model string) ([]byte, error) {
 	dec := jsontext.NewDecoder(bytes.NewReader(raw))
 	var buf bytes.Buffer
 	enc := jsontext.NewEncoder(&buf)

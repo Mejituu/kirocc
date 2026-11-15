@@ -34,6 +34,24 @@ type providerConfig struct {
 // fileConfig is the top level of the config file.
 type fileConfig struct {
 	Providers []providerConfig `json:"providers"`
+	// Mappings are the session-following rules, keyed by the provider the
+	// session last used. A JSON object's member arrays keep their order, so
+	// the group keys' order does not matter.
+	Mappings map[string][]mappingRule `json:"mappings,omitempty"`
+}
+
+// mappingRule is one entry of a mappings group.
+type mappingRule struct {
+	Model    string        `json:"model"`
+	Thinking *bool         `json:"thinking,omitempty"` // nil = either
+	Stream   *bool         `json:"stream,omitempty"`   // nil = either
+	To       mappingTarget `json:"to"`
+}
+
+// mappingTarget is the rule's destination.
+type mappingTarget struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // Load reads the custom provider config. An empty path selects the default
@@ -111,6 +129,9 @@ func loadFile(path string) (*Registry, error) {
 			"config", path,
 		)
 	}
+	if n := registry.mappingCount(); n > 0 {
+		slog.Info("model mappings loaded", "rules", n)
+	}
 	return registry, nil
 }
 
@@ -125,6 +146,9 @@ func buildRegistry(path string, fc fileConfig) (*Registry, error) {
 		}
 		if seenNames[pc.Name] {
 			return nil, fmt.Errorf("%s: providers[%d].name %q is declared twice", path, i, pc.Name)
+		}
+		if pc.Name == KiroProviderName {
+			return nil, fmt.Errorf("%s: providers[%d].name %q is reserved for mappings (the Kiro path); rename it", path, i, pc.Name)
 		}
 		seenNames[pc.Name] = true
 
@@ -161,7 +185,71 @@ func buildRegistry(path string, fc fileConfig) (*Registry, error) {
 		}
 		registry.providers = append(registry.providers, p)
 	}
+
+	mappings, err := buildMappings(path, fc, registry)
+	if err != nil {
+		return nil, err
+	}
+	registry.mappings = mappings
 	return registry, nil
+}
+
+// buildMappings validates and compiles the session-following rules. Errors
+// locate the offending group and rule index.
+func buildMappings(path string, fc fileConfig, registry *Registry) (map[string][]Mapping, error) {
+	if len(fc.Mappings) == 0 {
+		return nil, nil
+	}
+	providers := make(map[string]*Provider, len(registry.providers))
+	for _, p := range registry.providers {
+		providers[p.Name] = p
+	}
+	result := make(map[string][]Mapping, len(fc.Mappings))
+	for group, rules := range fc.Mappings {
+		if group != KiroProviderName {
+			if _, ok := providers[group]; !ok {
+				return nil, fmt.Errorf("%s: mappings[%q]: unknown provider (declare it in providers, or use %q)", path, group, KiroProviderName)
+			}
+		}
+		compiled := make([]Mapping, 0, len(rules))
+		for i, rule := range rules {
+			if rule.Model == "" {
+				return nil, fmt.Errorf("%s: mappings[%q][%d].model must not be empty", path, group, i)
+			}
+			if rule.To.Provider == "" {
+				return nil, fmt.Errorf("%s: mappings[%q][%d].to.provider must not be empty", path, group, i)
+			}
+			if rule.To.Model == "" {
+				return nil, fmt.Errorf("%s: mappings[%q][%d].to.model must not be empty", path, group, i)
+			}
+			if rule.To.Provider != KiroProviderName {
+				p, ok := providers[rule.To.Provider]
+				if !ok {
+					return nil, fmt.Errorf("%s: mappings[%q][%d].to.provider: unknown provider %q", path, group, i, rule.To.Provider)
+				}
+				// A kiro target is checked per request instead: the model
+				// catalog only fills in after startup.
+				if !p.hasModelBase(trimOneMSuffix(rule.To.Model)) {
+					return nil, fmt.Errorf("%s: mappings[%q][%d].to.model: %q is not a model of provider %q", path, group, i, rule.To.Model, p.Name)
+				}
+			}
+			m := Mapping{
+				Model:    trimOneMSuffix(rule.Model),
+				Thinking: rule.Thinking,
+				Stream:   rule.Stream,
+				Provider: rule.To.Provider,
+				ModelTo:  rule.To.Model,
+			}
+			for _, prev := range compiled {
+				if prev.sameCondition(m) {
+					return nil, fmt.Errorf("%s: mappings[%q][%d] duplicates an earlier rule with the same model, thinking and stream, so it can never match", path, group, i)
+				}
+			}
+			compiled = append(compiled, m)
+		}
+		result[group] = compiled
+	}
+	return result, nil
 }
 
 // countModels sums the declared models to size the lookup map.

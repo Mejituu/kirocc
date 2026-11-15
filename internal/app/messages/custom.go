@@ -15,6 +15,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/customprov"
 	"github.com/d-kuro/kirocc/internal/httpx"
 	"github.com/d-kuro/kirocc/internal/logging"
+	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/reqconv"
 	"github.com/d-kuro/kirocc/internal/tokencount"
 )
@@ -54,9 +55,11 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 		return true
 	}
 
-	// The Claude Code session ID rides along for the logs; unlike the Kiro
-	// path nothing is generated when the header is absent.
-	if ccSessionID := r.Header.Get(headerCCSessionID); ccSessionID != "" {
+	// The Claude Code session ID rides along for the logs and the
+	// session-following mappings; unlike the Kiro path nothing is generated
+	// when the header is absent.
+	ccSessionID := r.Header.Get(headerCCSessionID)
+	if ccSessionID != "" {
 		ctx = logging.WithSessionID(ctx, ccSessionID)
 	}
 
@@ -68,16 +71,83 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 		return false
 	}
 
+	// Session-following mappings apply only to /v1/messages and only when
+	// the session is known. A mapped request never updates the session's
+	// provider — not even when its target turns out unknown and the request
+	// falls back to normal routing.
+	recordSession := endpoint == customprov.EndpointMessages && ccSessionID != ""
+	if recordSession {
+		if sessionProvider, mapping, ok := s.custom.MatchMapping(ccSessionID, peek); ok {
+			recordSession = false
+			slog.InfoContext(ctx, "model mapped",
+				"trace_id", short,
+				"session_id", logging.ShortID(ccSessionID),
+				"session_provider", sessionProvider,
+				"from", peek.Model,
+				"to_provider", mapping.Provider,
+				"to_model", mapping.ModelTo,
+			)
+			if mapping.Provider == customprov.KiroProviderName {
+				if _, _, known := models.ResolveKnown(mapping.ModelTo); known {
+					newRaw, err := customprov.RewriteModel(raw, mapping.ModelTo)
+					if err != nil {
+						// The model field was peeked as a string, so the
+						// rewrite cannot fail; treat the request as unmapped
+						// rather than forward a wrong body.
+						slog.ErrorContext(ctx, "model mapping rewrite failed", "trace_id", short, "err", err)
+					} else {
+						// Hand the rewritten body to the Kiro path, whose own
+						// logs and resolution then show the target model.
+						r.Body = io.NopCloser(bytes.NewReader(newRaw))
+						r.ContentLength = int64(len(newRaw))
+						return false
+					}
+				} else {
+					slog.WarnContext(ctx, "model mapping target unknown", "trace_id", short, "to_model", mapping.ModelTo)
+				}
+			} else if hit, ok := s.custom.LookupBase(mapping.ModelTo); ok {
+				debugRequestLogs(ctx, traceID, endpoint, r, raw)
+				s.custom.Forward(ctx, w, r.Header, raw, hit, peek, endpoint)
+				return true
+			} else {
+				// Unreachable: config validation checks custom targets at
+				// startup. Treated like an unknown Kiro target.
+				slog.WarnContext(ctx, "model mapping target unknown", "trace_id", short, "to_model", mapping.ModelTo)
+			}
+		}
+	}
+
 	hit, ok := s.custom.Lookup(peek.Model)
 	if !ok {
 		r.Body = io.NopCloser(bytes.NewReader(raw))
+		if recordSession {
+			s.custom.RecordSession(ccSessionID, customprov.KiroProviderName)
+		}
 		return false
 	}
 
-	// Debug request logging mirrors the Kiro path: the body as
-	// parseAndValidateRequest logs it, then the headers as HandleMessages
-	// logs them — the latter only on /v1/messages, whose Kiro counterpart
-	// logs them (HandleCountTokens does not).
+	debugRequestLogs(ctx, traceID, endpoint, r, raw)
+
+	// count_tokens stays local when the provider is configured without it:
+	// providers without a count_tokens endpoint would otherwise turn every
+	// probe into an upstream error.
+	if endpoint == customprov.EndpointCountTokens && !hit.Provider.CountTokens {
+		s.countTokensLocally(ctx, w, r, raw, hit)
+		return true
+	}
+
+	if recordSession {
+		s.custom.RecordSession(ccSessionID, hit.Provider.Name)
+	}
+	s.custom.Forward(ctx, w, r.Header, raw, hit, peek, endpoint)
+	return true
+}
+
+// debugRequestLogs emits the custom path's debug request logging, mirroring
+// the Kiro path: the body as parseAndValidateRequest logs it, then the
+// headers as HandleMessages logs them — the latter only on /v1/messages,
+// whose Kiro counterpart logs them (HandleCountTokens does not).
+func debugRequestLogs(ctx context.Context, traceID string, endpoint customprov.Endpoint, r *http.Request, raw []byte) {
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		slog.DebugContext(ctx, "client request body", "request_body", jsontext.Value(raw))
 	}
@@ -88,17 +158,6 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 			"headers", logging.SafeHeaders{H: r.Header},
 		)
 	}
-
-	// count_tokens stays local when the provider is configured without it:
-	// providers without a count_tokens endpoint would otherwise turn every
-	// probe into an upstream error.
-	if endpoint == customprov.EndpointCountTokens && !hit.Provider.CountTokens {
-		s.countTokensLocally(ctx, w, r, raw, hit)
-		return true
-	}
-
-	s.custom.Forward(ctx, w, r.Header, raw, hit, peek, endpoint)
-	return true
 }
 
 // readRawRequestBody reads the whole body under the size cap, wrapping read

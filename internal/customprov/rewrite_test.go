@@ -9,7 +9,7 @@ import (
 
 func TestRewriteModel_ReplacesTopLevelModel(t *testing.T) {
 	in := `{"model":"claude-glm-5.3","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
-	out, err := rewriteModel([]byte(in), "glm-5.3")
+	out, err := RewriteModel([]byte(in), "glm-5.3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestRewriteModel_ReplacesTopLevelModel(t *testing.T) {
 
 func TestRewriteModel_PreservesUnknownFieldsOrderAndNumbers(t *testing.T) {
 	in := `{"model":"claude-glm-5.3","temperature":0.5,"metadata":{"user_id":"u1"},"service_tier":"auto","big":12345678901234567890,"mcp_servers":[{"type":"url"}]}`
-	out, err := rewriteModel([]byte(in), "glm-5.3")
+	out, err := RewriteModel([]byte(in), "glm-5.3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestRewriteModel_PreservesUnknownFieldsOrderAndNumbers(t *testing.T) {
 
 func TestRewriteModel_OnlyTopLevel(t *testing.T) {
 	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}],"nested":{"model":"claude-glm-5.3"}}`
-	out, err := rewriteModel([]byte(in), "glm-5.3")
+	out, err := RewriteModel([]byte(in), "glm-5.3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,14 +67,14 @@ func TestRewriteModel_OnlyTopLevel(t *testing.T) {
 }
 
 func TestRewriteModel_ModelValueNotString(t *testing.T) {
-	_, err := rewriteModel([]byte(`{"model":42}`), "glm-5.3")
+	_, err := RewriteModel([]byte(`{"model":42}`), "glm-5.3")
 	if err == nil {
 		t.Fatal("expected an error when model is not a string")
 	}
 }
 
 func TestRewriteModel_RootNotObject(t *testing.T) {
-	if _, err := rewriteModel([]byte(`["model"]`), "glm-5.3"); err == nil {
+	if _, err := RewriteModel([]byte(`["model"]`), "glm-5.3"); err == nil {
 		t.Fatal("expected an error for a non-object root")
 	}
 }

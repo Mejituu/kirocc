@@ -68,6 +68,9 @@ type Registry struct {
 	providers []*Provider
 	// byBase maps a bare model base name ("glm-5.3") to its match.
 	byBase map[string]modelMatch
+	// mappings holds the session-following rules, keyed by the provider the
+	// session last used.
+	mappings map[string][]Mapping
 }
 
 // Lookup maps a requested model ID to its provider. A model matches when the
@@ -87,6 +90,28 @@ func (r *Registry) Lookup(model string) (Hit, bool) {
 		return Hit{}, false
 	}
 	return Hit{Provider: m.provider, BaseModel: rest, Config1M: m.model.Name != m.model.Base}, true
+}
+
+// lookupBase resolves a configured model by its base name — the mapping
+// target spelling — without the claude- prefix.
+func (r *Registry) lookupBase(base string) (Hit, bool) {
+	if r == nil {
+		return Hit{}, false
+	}
+	m, ok := r.byBase[base]
+	if !ok {
+		return Hit{}, false
+	}
+	return Hit{Provider: m.provider, BaseModel: m.model.Base, Config1M: m.model.Name != m.model.Base}, true
+}
+
+// mappingCount totals the compiled session-following rules.
+func (r *Registry) mappingCount() int {
+	n := 0
+	for _, rules := range r.mappings {
+		n += len(rules)
+	}
+	return n
 }
 
 // ModelInfo is one custom-provider entry for /v1/models.

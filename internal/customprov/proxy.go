@@ -55,6 +55,9 @@ type outputConfigPeek struct {
 type Proxy struct {
 	registry *Registry
 	client   *http.Client
+	// sessions tracks which provider each Claude Code session last used, for
+	// the session-following mappings.
+	sessions *sessionTable
 }
 
 // NewProxy builds the forwarding client. responseHeaderTimeout bounds the
@@ -64,12 +67,40 @@ type Proxy struct {
 func NewProxy(reg *Registry, responseHeaderTimeout time.Duration) *Proxy {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
-	return &Proxy{registry: reg, client: &http.Client{Transport: transport}}
+	return &Proxy{registry: reg, client: &http.Client{Transport: transport}, sessions: newSessionTable(sessionTableCapacity)}
 }
 
 // Lookup reports whether a requested model ID maps to a custom provider.
 func (p *Proxy) Lookup(model string) (Hit, bool) {
 	return p.registry.Lookup(model)
+}
+
+// LookupBase resolves a mapping target model by its base name, without the
+// claude- prefix.
+func (p *Proxy) LookupBase(base string) (Hit, bool) {
+	return p.registry.lookupBase(base)
+}
+
+// MatchMapping resolves the session-following mapping for a request: the
+// session's provider comes from the session table, then the first matching
+// rule of that provider's group wins. The session provider is returned for
+// logging.
+func (p *Proxy) MatchMapping(sessionID string, info RequestInfo) (sessionProvider string, m Mapping, ok bool) {
+	provider, ok := p.sessions.get(sessionID)
+	if !ok {
+		return "", Mapping{}, false
+	}
+	m, matched := p.registry.matchMapping(provider, info)
+	if !matched {
+		return "", Mapping{}, false
+	}
+	return provider, m, true
+}
+
+// RecordSession notes which provider a session's most recent unmapped
+// request used.
+func (p *Proxy) RecordSession(sessionID, provider string) {
+	p.sessions.put(sessionID, provider)
 }
 
 // ListModels returns the custom models for /v1/models.
@@ -95,7 +126,7 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		slog.InfoContext(ctx, "--> POST /v1/messages", requestLogArgs(ctx, short, hit, info)...)
 	}
 
-	body, err := rewriteModel(raw, hit.BaseModel)
+	body, err := RewriteModel(raw, hit.BaseModel)
 	if err != nil {
 		slog.ErrorContext(ctx, "custom provider request rewrite failed", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest, "invalid request: "+err.Error())
