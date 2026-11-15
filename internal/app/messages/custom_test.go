@@ -75,7 +75,7 @@ func newCustomService(t *testing.T, upstreamURL string, countTokens bool) (*Serv
 	if !countTokens {
 		countField = `"count_tokens":false,`
 	}
-	content := fmt.Sprintf(`{"providers":[{"name":"bailian","base_url":%q,%s"auth_token":"secret-token","models":["glm-5.3[1m]"]}]}`, upstreamURL, countField)
+	content := fmt.Sprintf(`{"providers":[{"name":"bailian","base_url":%q,%s"auth_token":"secret-token","models":["glm-5.3[1m]","kimi-k3"]}]}`, upstreamURL, countField)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

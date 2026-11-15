@@ -50,13 +50,24 @@ type Provider struct {
 type Hit struct {
 	Provider  *Provider
 	BaseModel string // model ID to send to the provider
+	// Config1M reports whether the model's configured name carries the [1m]
+	// marker: the context window advertised in /v1/models, regardless of how
+	// the request spelled the ID.
+	Config1M bool
+}
+
+// modelMatch is the registry entry a base name resolves to: the provider and
+// the model declaration as configured.
+type modelMatch struct {
+	provider *Provider
+	model    Model
 }
 
 // Registry indexes the configured models for request matching.
 type Registry struct {
 	providers []*Provider
-	// byBase maps a bare model base name ("glm-5.3") to its provider.
-	byBase map[string]*Provider
+	// byBase maps a bare model base name ("glm-5.3") to its match.
+	byBase map[string]modelMatch
 }
 
 // Lookup maps a requested model ID to its provider. A model matches when the
@@ -71,11 +82,11 @@ func (r *Registry) Lookup(model string) (Hit, bool) {
 	if !ok {
 		return Hit{}, false
 	}
-	p, ok := r.byBase[rest]
+	m, ok := r.byBase[rest]
 	if !ok {
 		return Hit{}, false
 	}
-	return Hit{Provider: p, BaseModel: rest}, true
+	return Hit{Provider: m.provider, BaseModel: rest, Config1M: m.model.Name != m.model.Base}, true
 }
 
 // ModelInfo is one custom-provider entry for /v1/models.

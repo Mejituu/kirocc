@@ -117,7 +117,7 @@ func loadFile(path string) (*Registry, error) {
 // buildRegistry validates the parsed file and turns it into a lookup table.
 // Errors are prefixed with the file path and locate the offending entry.
 func buildRegistry(path string, fc fileConfig) (*Registry, error) {
-	registry := &Registry{byBase: make(map[string]*Provider, countModels(fc))}
+	registry := &Registry{byBase: make(map[string]modelMatch, countModels(fc))}
 	seenNames := make(map[string]bool, len(fc.Providers))
 	for i, pc := range fc.Providers {
 		if pc.Name == "" {
@@ -151,13 +151,13 @@ func buildRegistry(path string, fc fileConfig) (*Registry, error) {
 				return nil, fmt.Errorf("%s: providers[%d].models: %w", path, i, err)
 			}
 			if other, ok := registry.byBase[m.Base]; ok {
-				return nil, fmt.Errorf("%s: model %q is declared by providers %q and %q", path, m.Base, other.Name, p.Name)
+				return nil, fmt.Errorf("%s: model %q is declared by providers %q and %q", path, m.Base, other.provider.Name, p.Name)
 			}
 			if err := checkBuiltinConflict(path, m); err != nil {
 				return nil, err
 			}
 			p.Models = append(p.Models, m)
-			registry.byBase[m.Base] = p
+			registry.byBase[m.Base] = modelMatch{provider: p, model: m}
 		}
 		registry.providers = append(registry.providers, p)
 	}

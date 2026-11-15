@@ -3,6 +3,7 @@ package messages
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -31,7 +32,7 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 	if s.custom == nil {
 		return false
 	}
-	_, short := logging.TraceIDs(ctx)
+	traceID, short := logging.TraceIDs(ctx)
 
 	raw, err := readRawRequestBody(w, r, s.maxRequestBody)
 	if err != nil {
@@ -53,6 +54,12 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 		return true
 	}
 
+	// The Claude Code session ID rides along for the logs; unlike the Kiro
+	// path nothing is generated when the header is absent.
+	if ccSessionID := r.Header.Get(headerCCSessionID); ccSessionID != "" {
+		ctx = logging.WithSessionID(ctx, ccSessionID)
+	}
+
 	var peek customprov.RequestInfo
 	if err := json.Unmarshal(raw, &peek); err != nil {
 		// Unparseable body: not a custom-model request; the regular path
@@ -65,6 +72,21 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 	if !ok {
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 		return false
+	}
+
+	// Debug request logging mirrors the Kiro path: the body as
+	// parseAndValidateRequest logs it, then the headers as HandleMessages
+	// logs them — the latter only on /v1/messages, whose Kiro counterpart
+	// logs them (HandleCountTokens does not).
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.DebugContext(ctx, "client request body", "request_body", jsontext.Value(raw))
+	}
+	if endpoint == customprov.EndpointMessages {
+		slog.DebugContext(ctx, "client request headers",
+			"trace_id", traceID,
+			"session_id", logging.SessionIDFromContext(ctx),
+			"headers", logging.SafeHeaders{H: r.Header},
+		)
 	}
 
 	// count_tokens stays local when the provider is configured without it:
