@@ -72,11 +72,11 @@ func (r *Registry) matchMapping(sessionProvider string, info RequestInfo) (Mappi
 	return Mapping{}, false
 }
 
-// hasModelBase reports whether the provider serves a model with the given
-// base name, for mapping-target validation.
-func (p *Provider) hasModelBase(base string) bool {
+// hasModelID reports whether the provider serves a model with exactly this
+// id, for mapping-target validation.
+func (p *Provider) hasModelID(id string) bool {
 	for _, m := range p.Models {
-		if m.Base == base {
+		if m.ID == id {
 			return true
 		}
 	}

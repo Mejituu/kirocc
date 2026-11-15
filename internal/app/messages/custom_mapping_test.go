@@ -50,11 +50,11 @@ func mappingUpstream(t *testing.T) (*httptest.Server, func() [][2]string) {
 // newMappingService builds a service whose bailian provider carries the
 // given mappings JSON. client serves the Kiro path; when requests are
 // expected to stay off it, pass &tripwireClient{t: t}.
-func newMappingService(t *testing.T, upstreamURL, mappings string, client kiroclient.Client) (*Service, *countingAuth) {
+func newMappingService(t *testing.T, upstreamURL, providerMappings, kiroMappings string, client kiroclient.Client) (*Service, *countingAuth) {
 	t.Helper()
 	t.Setenv("KIROCC_MODEL_MAPPINGS", "")
 	path := filepath.Join(t.TempDir(), "mejituu.json5")
-	content := fmt.Sprintf(`{"providers":[{"name":"bailian","base_url":%q,"auth_token":"secret-token","models":["glm-5.3[1m]","deepseek-v4.1-flash-1017"]}],"mappings":%s}`, upstreamURL, mappings)
+	content := fmt.Sprintf(`{"providers":{"bailian":{"base_url":%q,"auth_token":"secret-token","models":["glm-5.3[1m]","deepseek-v4.1-flash-1017"],"mappings":%s}},"kiro":{"mappings":%s}}`, upstreamURL, providerMappings, kiroMappings)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +77,12 @@ func postWithSession(t *testing.T, s *Service, session, body string) *httptest.R
 // request records the session, the classifier request then follows it to the
 // provider, and a request the rules do not match stays on the Kiro path.
 func TestCustomMapping_SessionFollowsProvider(t *testing.T) {
-	const mappings = `{"bailian":[{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"provider":"bailian","model":"deepseek-v4.1-flash-1017"}}]}`
+	const mappings = `[{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"model":"deepseek-v4.1-flash-1017"}}]`
 
 	upstream, upstreamRequests := mappingUpstream(t)
 	buf := captureTint(t, slog.LevelInfo)
 	var kiroCalled bool
-	s, _ := newMappingService(t, upstream.URL, mappings, &recordingKiroClient{called: &kiroCalled})
+	s, _ := newMappingService(t, upstream.URL, mappings, "[]", &recordingKiroClient{called: &kiroCalled})
 
 	// 1. A normal custom request records the session as bailian.
 	postWithSession(t, s, "sess-1", `{"model":"claude-glm-5.3","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
@@ -135,14 +135,12 @@ func TestCustomMapping_SessionFollowsProvider(t *testing.T) {
 // not rewrite the session's provider: mapping to kiro leaves the session on
 // bailian, so later bailian rules still apply.
 func TestCustomMapping_MappedRequestKeepsSession(t *testing.T) {
-	const mappings = `{
-		"bailian": [
-			{"model":"claude-opus-5-5","to":{"provider":"kiro","model":"claude-haiku-4.5"}},
-			{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"provider":"bailian","model":"deepseek-v4.1-flash-1017"}}
-		]
-	}`
+	const mappings = `[
+		{"model":"claude-opus-5-5","to":{"provider":"kiro","model":"claude-haiku-4.5"}},
+		{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"model":"deepseek-v4.1-flash-1017"}}
+	]`
 	upstream, upstreamRequests := mappingUpstream(t)
-	s, _ := newMappingService(t, upstream.URL, mappings, &recordingKiroClient{called: new(bool)})
+	s, _ := newMappingService(t, upstream.URL, mappings, "[]", &recordingKiroClient{called: new(bool)})
 
 	postWithSession(t, s, "sess-1", `{"model":"claude-glm-5.3","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 	// Mapped to kiro: had this rewritten the session, the next request would
@@ -183,11 +181,11 @@ func (c *capturingKiroClient) model() string {
 // Kiro maps through the kiro group, and the Kiro path receives the rewritten
 // model.
 func TestCustomMapping_KiroSessionMapsToKiro(t *testing.T) {
-	const mappings = `{"kiro":[{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"provider":"kiro","model":"claude-haiku-4.5"}}]}`
+	const mappings = `[{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"model":"claude-haiku-4.5"}}]`
 	upstream, upstreamRequests := mappingUpstream(t)
 	buf := captureTint(t, slog.LevelInfo)
 	client := &capturingKiroClient{}
-	s, _ := newMappingService(t, upstream.URL, mappings, client)
+	s, _ := newMappingService(t, upstream.URL, "[]", mappings, client)
 
 	// A non-custom request records the session as kiro (the Kiro call then
 	// fails; the session was already noted before auth).
@@ -211,15 +209,13 @@ func TestCustomMapping_KiroSessionMapsToKiro(t *testing.T) {
 // TestCustomMapping_UnknownKiroTarget asserts an unknown kiro target warns
 // and leaves the request on normal routing without rewriting the session.
 func TestCustomMapping_UnknownKiroTarget(t *testing.T) {
-	const mappings = `{
-		"bailian": [
-			{"model":"claude-opus-5-5","to":{"provider":"kiro","model":"claude-nonexistent-9"}},
-			{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"provider":"bailian","model":"deepseek-v4.1-flash-1017"}}
-		]
-	}`
+	const mappings = `[
+		{"model":"claude-opus-5-5","to":{"provider":"kiro","model":"claude-nonexistent-9"}},
+		{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"model":"deepseek-v4.1-flash-1017"}}
+	]`
 	upstream, upstreamRequests := mappingUpstream(t)
 	buf := captureSlogAtLevel(t, slog.LevelInfo)
-	s, _ := newMappingService(t, upstream.URL, mappings, &recordingKiroClient{called: new(bool)})
+	s, _ := newMappingService(t, upstream.URL, mappings, "[]", &recordingKiroClient{called: new(bool)})
 
 	postWithSession(t, s, "sess-1", `{"model":"claude-glm-5.3","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 	// Target unknown: warn, no mapping, and the session is not rewritten.
@@ -242,10 +238,10 @@ func TestCustomMapping_UnknownKiroTarget(t *testing.T) {
 // TestCustomMapping_NoMappingWithoutSession asserts the preconditions: no
 // session header, an unknown session, and count_tokens never map.
 func TestCustomMapping_NoMappingWithoutSession(t *testing.T) {
-	const mappings = `{"bailian":[{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"provider":"bailian","model":"deepseek-v4.1-flash-1017"}}]}`
+	const mappings = `[{"model":"claude-sonnet-5","thinking":false,"stream":false,"to":{"model":"deepseek-v4.1-flash-1017"}}]`
 	upstream, upstreamRequests := mappingUpstream(t)
 	var kiroCalled bool
-	s, _ := newMappingService(t, upstream.URL, mappings, &recordingKiroClient{called: &kiroCalled})
+	s, _ := newMappingService(t, upstream.URL, mappings, "[]", &recordingKiroClient{called: &kiroCalled})
 
 	// No session header: no session to follow.
 	postCustomMessages(t, s, `{"model":"claude-sonnet-5","max_tokens":16,"messages":[{"role":"user","content":"classify"}]}`, nil)
@@ -273,5 +269,54 @@ func TestCustomMapping_NoMappingWithoutSession(t *testing.T) {
 	postWithSession(t, s, "sess-2", `{"model":"claude-sonnet-5","max_tokens":16,"messages":[{"role":"user","content":"classify"}]}`)
 	if got := upstreamRequests(); len(got) != 0 {
 		t.Errorf("session should still be kiro after count_tokens; requests = %v", got)
+	}
+}
+
+// TestHandleMessages_AliasAcrossProviders asserts two providers can serve
+// the same model id under different aliases, each forwarding to its own
+// upstream.
+func TestHandleMessages_AliasAcrossProviders(t *testing.T) {
+	var mu sync.Mutex
+	models := make(map[string]string) // upstream URL → forwarded model
+	handler := func(url string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			var peek struct {
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(raw, &peek)
+			mu.Lock()
+			models[url] = peek.Model
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"type":"message"}`))
+		}
+	}
+	upA := httptest.NewServer(handler("a"))
+	defer upA.Close()
+	upB := httptest.NewServer(handler("b"))
+	defer upB.Close()
+
+	t.Setenv("KIROCC_MODEL_MAPPINGS", "")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
+	content := fmt.Sprintf(`{"providers":{"bailian":{"base_url":%q,"auth_token":"t","models":[{"id":"glm-5.3","alias":"glm-bailian"}]},"zhipu":{"base_url":%q,"auth_token":"t","models":[{"id":"glm-5.3","alias":"glm-zhipu"}]}}}`, upA.URL, upB.URL)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := customprov.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(&countingAuth{creds: &auth.Credentials{AccessToken: "t", ProfileARN: "arn", Region: "us-east-1"}}, &tripwireClient{t: t}, WithCustomProviders(customprov.NewProxy(reg, 5*time.Second)))
+
+	postCustomMessages(t, s, `{"model":"claude-glm-bailian","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	postCustomMessages(t, s, `{"model":"claude-glm-zhipu","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if models["a"] != "glm-5.3" || models["b"] != "glm-5.3" {
+		t.Errorf("forwarded models = %v, want glm-5.3 on both upstreams", models)
+	}
+	if len(models) != 2 {
+		t.Errorf("both upstreams should have been hit: %v", models)
 	}
 }

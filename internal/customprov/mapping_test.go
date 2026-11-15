@@ -6,13 +6,11 @@ import (
 	"time"
 )
 
-// mappingConfig wraps a provider declaration with mappings JSON.
-const mappingProviderConfig = `{"providers":[{"name":"bailian","base_url":"http://p","auth_token":"t","models":["glm-5.3[1m]","deepseek-v4.1-flash-1017"]}],"mappings":%s}`
+// mappingProviderConfig is one provider carrying a mappings group.
+const mappingProviderConfig = `{"providers":{"bailian":{"base_url":"http://p","auth_token":"t","models":["glm-5.3[1m]","deepseek-v4.1-flash-1017"],"mappings":%s}}}`
 
-func loadMappingRegistry(t *testing.T, mappings string) (*Registry, error) {
-	t.Helper()
-	return loadTestRegistry(t, strings.Replace(mappingProviderConfig, "%s", mappings, 1))
-}
+// mappingKiroConfig carries the mappings under kiro.
+const mappingKiroConfig = `{"kiro":{"mappings":%s},"providers":{"bailian":{"base_url":"http://p","auth_token":"t","models":["glm-5.3[1m]","deepseek-v4.1-flash-1017"]}}}`
 
 func TestBuildMappings_ValidationErrors(t *testing.T) {
 	tests := []struct {
@@ -21,39 +19,34 @@ func TestBuildMappings_ValidationErrors(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "unknown group",
-			mapping: `{"unknown":[{"model":"m","to":{"provider":"kiro","model":"x"}}]}`,
-			wantErr: `mappings["unknown"]: unknown provider`,
-		},
-		{
 			name:    "unknown to.provider",
-			mapping: `{"kiro":[{"model":"m","to":{"provider":"nope","model":"x"}}]}`,
-			wantErr: `mappings["kiro"][0].to.provider: unknown provider "nope"`,
+			mapping: `[{"model":"m","to":{"provider":"nope","model":"x"}}]`,
+			wantErr: `providers.bailian.mappings[0].to.provider: unknown provider "nope"`,
 		},
 		{
 			name:    "to.model not a provider model",
-			mapping: `{"kiro":[{"model":"m","to":{"provider":"bailian","model":"missing-model"}}]}`,
-			wantErr: `mappings["kiro"][0].to.model: "missing-model" is not a model of provider "bailian"`,
+			mapping: `[{"model":"m","to":{"provider":"bailian","model":"missing-model"}}]`,
+			wantErr: `providers.bailian.mappings[0].to.model: "missing-model" is not a model id of provider "bailian"`,
 		},
 		{
 			name:    "empty rule model",
-			mapping: `{"kiro":[{"model":"","to":{"provider":"kiro","model":"x"}}]}`,
-			wantErr: `mappings["kiro"][0].model must not be empty`,
+			mapping: `[{"model":"","to":{"provider":"kiro","model":"x"}}]`,
+			wantErr: `providers.bailian.mappings[0].model must not be empty`,
 		},
 		{
 			name:    "empty to.model",
-			mapping: `{"kiro":[{"model":"m","to":{"provider":"kiro","model":""}}]}`,
-			wantErr: `mappings["kiro"][0].to.model must not be empty`,
+			mapping: `[{"model":"m","to":{"provider":"kiro","model":""}}]`,
+			wantErr: `providers.bailian.mappings[0].to.model must not be empty`,
 		},
 		{
 			name:    "duplicate rules in a group",
-			mapping: `{"kiro":[{"model":"m","thinking":false,"stream":false,"to":{"provider":"kiro","model":"x"}},{"model":"m","thinking":false,"stream":false,"to":{"provider":"kiro","model":"y"}}]}`,
+			mapping: `[{"model":"m","thinking":false,"stream":false,"to":{"provider":"kiro","model":"x"}},{"model":"m","thinking":false,"stream":false,"to":{"provider":"kiro","model":"y"}}]`,
 			wantErr: "can never match",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := loadMappingRegistry(t, tt.mapping)
+			_, err := loadTestRegistry(t, strings.Replace(mappingProviderConfig, "%s", tt.mapping, 1))
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 			}
@@ -66,8 +59,8 @@ func TestBuildMappings_ValidationErrors(t *testing.T) {
 
 func TestBuildMappings_KiroTargetNotValidated(t *testing.T) {
 	// A kiro target's model is checked per request, not at startup: the
-	// catalog fills in after startup.
-	reg, err := loadMappingRegistry(t, `{"kiro":[{"model":"m","to":{"provider":"kiro","model":"claude-not-in-any-table"}}]}`)
+	// catalog only fills in after startup.
+	reg, err := loadTestRegistry(t, strings.Replace(mappingProviderConfig, "%s", `[{"model":"m","to":{"provider":"kiro","model":"claude-not-in-any-table"}}]`, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,38 +79,63 @@ func TestBuildMappings_NoMappingsSection(t *testing.T) {
 	}
 }
 
-func TestBuildMappings_ToModelWith1MMatchesBase(t *testing.T) {
-	// The [1m] marker is ignored when matching a mapping target against the
-	// provider's models.
-	if _, err := loadMappingRegistry(t, `{"kiro":[{"model":"m","to":{"provider":"bailian","model":"deepseek-v4.1-flash-1017[1m]"}}]}`); err != nil {
-		t.Fatal(err)
-	}
+// TestBuildMappings_DefaultProvider asserts an omitted to.provider defaults
+// to the group: kiro for kiro.mappings, the provider itself for its own
+// group.
+func TestBuildMappings_DefaultProvider(t *testing.T) {
+	t.Run("kiro group defaults to kiro", func(t *testing.T) {
+		reg, err := loadTestRegistry(t, strings.Replace(mappingKiroConfig, "%s", `[{"model":"claude-m","to":{"model":"x"}}]`, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, ok := reg.matchMapping(KiroProviderName, RequestInfo{Model: "claude-m"})
+		if !ok || m.Provider != KiroProviderName || m.ModelTo != "x" {
+			t.Errorf("match = %+v, ok = %v; want provider kiro", m, ok)
+		}
+	})
+
+	t.Run("provider group defaults to the provider", func(t *testing.T) {
+		reg, err := loadTestRegistry(t, strings.Replace(mappingProviderConfig, "%s", `[{"model":"claude-m","to":{"model":"deepseek-v4.1-flash-1017"}}]`, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, ok := reg.matchMapping("bailian", RequestInfo{Model: "claude-m"})
+		if !ok || m.Provider != "bailian" || m.ModelTo != "deepseek-v4.1-flash-1017" {
+			t.Errorf("match = %+v, ok = %v; want provider bailian", m, ok)
+		}
+		hit, ok := reg.lookupModel("bailian", m.ModelTo)
+		if !ok || hit.BaseModel != "deepseek-v4.1-flash-1017" {
+			t.Errorf("lookupModel = %+v, %v", hit, ok)
+		}
+	})
 }
 
-func TestBuildMappings_ReservedProviderName(t *testing.T) {
-	_, err := loadTestRegistry(t, `{"providers":[{"name":"kiro","base_url":"http://p","auth_token":"t","models":["m"]}]}`)
-	if err == nil {
-		t.Fatal("expected an error for a provider named kiro")
-	}
-	if !strings.Contains(err.Error(), "is reserved") {
-		t.Errorf("error should explain the reserved name: %v", err)
-	}
-}
-
-func TestMappingsLoadedLog(t *testing.T) {
-	buf := captureSlog(t)
-	reg, err := loadMappingRegistry(t, `{"kiro":[{"model":"m","to":{"provider":"kiro","model":"x"}},{"model":"n","to":{"provider":"bailian","model":"glm-5.3"}}]}`)
+// TestBuildMappings_TargetByAliasRejected asserts a mapping target must use
+// the model id; the alias does not resolve (config-level error already
+// covered, this locks the runtime lookup too).
+func TestBuildMappings_TargetByAliasRejected(t *testing.T) {
+	config := `{"providers":{"p":{"base_url":"http://p","auth_token":"t",` +
+		`"models":[{"id":"real-id","alias":"pretty"}],` +
+		`"mappings":[{"model":"m","to":{"model":"real-id"}}]}}}`
+	reg, err := loadTestRegistry(t, config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = reg
-	if !strings.Contains(buf.String(), "model mappings loaded") || !strings.Contains(buf.String(), `"rules":2`) {
-		t.Errorf("expected a mappings-loaded log with 2 rules, got:\n%s", buf.String())
+	if _, ok := reg.lookupModel("p", "pretty"); ok {
+		t.Error("lookupModel by alias must not hit")
+	}
+	hit, ok := reg.lookupModel("p", "real-id")
+	if !ok || hit.BaseModel != "real-id" {
+		t.Errorf("lookupModel by id = %+v, %v", hit, ok)
+	}
+	// The alias still routes normal requests.
+	if hit, ok := reg.Lookup("claude-pretty"); !ok || hit.BaseModel != "real-id" {
+		t.Errorf("Lookup(claude-pretty) = %+v, %v; want the aliased model", hit, ok)
 	}
 }
 
 func TestLookup_ModelWithSlashAndCase(t *testing.T) {
-	reg, err := loadTestRegistry(t, `{"providers":[{"name":"bailian","base_url":"http://p","auth_token":"t","models":["ZHIPU/GLM-5.3[1m]"]}]}`)
+	reg, err := loadTestRegistry(t, `{"providers":{"bailian":{"base_url":"http://p","auth_token":"t","models":["ZHIPU/GLM-5.3[1m]"]}}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,12 +154,11 @@ func TestLookup_ModelWithSlashAndCase(t *testing.T) {
 }
 
 func TestMatchMapping_OrderBySessionProviderAndFilters(t *testing.T) {
-	reg, err := loadMappingRegistry(t, `{
-		"kiro": [
-			{"model":"claude-sonnet-5","stream":false,"to":{"provider":"kiro","model":"claude-haiku-4.5"}},
-			{"model":"claude-sonnet-5","to":{"provider":"bailian","model":"glm-5.3"}}
-		]
-	}`)
+	mappings := `[
+		{"model":"claude-sonnet-5","stream":false,"to":{"model":"claude-haiku-4.5"}},
+		{"model":"claude-sonnet-5","to":{"provider":"bailian","model":"glm-5.3"}}
+	]`
+	reg, err := loadTestRegistry(t, strings.Replace(mappingKiroConfig, "%s", mappings, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,12 +194,11 @@ func TestMatchMapping_OrderBySessionProviderAndFilters(t *testing.T) {
 }
 
 func TestMatchMapping_ThinkingFilter(t *testing.T) {
-	reg, err := loadMappingRegistry(t, `{
-		"kiro": [
-			{"model":"claude-sonnet-5","thinking":false,"to":{"provider":"kiro","model":"a"}},
-			{"model":"claude-sonnet-5","thinking":true,"to":{"provider":"kiro","model":"b"}}
-		]
-	}`)
+	mappings := `[
+		{"model":"claude-sonnet-5","thinking":false,"to":{"model":"a"}},
+		{"model":"claude-sonnet-5","thinking":true,"to":{"model":"b"}}
+	]`
+	reg, err := loadTestRegistry(t, strings.Replace(mappingKiroConfig, "%s", mappings, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,5 +249,41 @@ func TestSessionTable_LRU(t *testing.T) {
 	}
 	if got := len(tbl.items); got != 2 {
 		t.Errorf("len = %d, want 2", got)
+	}
+}
+
+// TestBuildMappings_ForwardTarget asserts a rule may target a provider
+// declared later in the file — mappings compile after every provider is
+// registered.
+func TestBuildMappings_ForwardTarget(t *testing.T) {
+	config := `{"providers":{
+		"a":{"base_url":"http://a","auth_token":"t","models":["m1"],"mappings":[{"model":"claude-x","to":{"provider":"b","model":"m2"}}]},
+		"b":{"base_url":"http://b","auth_token":"t","models":["m2"]}
+	}}`
+	reg, err := loadTestRegistry(t, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := reg.matchMapping("a", RequestInfo{Model: "claude-x"})
+	if !ok || m.Provider != "b" || m.ModelTo != "m2" {
+		t.Errorf("match = %+v, ok = %v; want provider b, model m2", m, ok)
+	}
+}
+
+// TestBuildMappings_KiroToCustomProvider asserts kiro.mappings may target a
+// custom provider.
+func TestBuildMappings_KiroToCustomProvider(t *testing.T) {
+	config := `{"kiro":{"mappings":[{"model":"claude-x","to":{"provider":"bailian","model":"deepseek-v4.1-flash-1017"}}]},
+		"providers":{"bailian":{"base_url":"http://p","auth_token":"t","models":["deepseek-v4.1-flash-1017"]}}}`
+	reg, err := loadTestRegistry(t, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := reg.matchMapping(KiroProviderName, RequestInfo{Model: "claude-x"})
+	if !ok || m.Provider != "bailian" || m.ModelTo != "deepseek-v4.1-flash-1017" {
+		t.Errorf("match = %+v, ok = %v; want provider bailian", m, ok)
+	}
+	if _, ok := reg.lookupModel("bailian", m.ModelTo); !ok {
+		t.Error("mapping target should resolve to the provider's model")
 	}
 }

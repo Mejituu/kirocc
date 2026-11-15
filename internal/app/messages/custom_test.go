@@ -75,7 +75,7 @@ func newCustomService(t *testing.T, upstreamURL string, countTokens bool) (*Serv
 	if !countTokens {
 		countField = `"count_tokens":false,`
 	}
-	content := fmt.Sprintf(`{"providers":[{"name":"bailian","base_url":%q,%s"auth_token":"secret-token","models":["glm-5.3[1m]","kimi-k3"]}]}`, upstreamURL, countField)
+	content := fmt.Sprintf(`{"providers":{"bailian":{"base_url":%q,%s"auth_token":"secret-token","models":["glm-5.3[1m]","kimi-k3"]}}}`, upstreamURL, countField)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestHandleMessages_NonCustomModelStillHitsKiroAuth(t *testing.T) {
 	// The tripwire client fails the test if reached, so build the service with
 	// a client that records the call instead.
 	path := filepath.Join(t.TempDir(), "mejituu.json5")
-	if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"providers":[{"name":"bailian","base_url":%q,"auth_token":"t","models":["glm-5.3[1m]"]}]}`, upstream.URL)), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"providers":{"bailian":{"base_url":%q,"auth_token":"t","models":["glm-5.3[1m]"]}}}`, upstream.URL)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	reg, err := customprov.Load(path)

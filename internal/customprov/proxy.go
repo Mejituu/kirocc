@@ -75,10 +75,10 @@ func (p *Proxy) Lookup(model string) (Hit, bool) {
 	return p.registry.Lookup(model)
 }
 
-// LookupBase resolves a mapping target model by its base name, without the
-// claude- prefix.
-func (p *Proxy) LookupBase(base string) (Hit, bool) {
-	return p.registry.lookupBase(base)
+// LookupModel resolves a mapping target: the model with exactly this id in
+// the named provider.
+func (p *Proxy) LookupModel(providerName, id string) (Hit, bool) {
+	return p.registry.lookupModel(providerName, id)
 }
 
 // MatchMapping resolves the session-following mapping for a request: the

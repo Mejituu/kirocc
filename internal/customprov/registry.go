@@ -1,7 +1,6 @@
 package customprov
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/d-kuro/kirocc/internal/models"
@@ -9,20 +8,17 @@ import (
 
 // Model is one model declared for a custom provider.
 type Model struct {
-	// Name is the configured spelling, e.g. "glm-5.3" or "glm-5.3[1m]".
-	Name string
-	// Base is Name without the trailing [1m] marker: the model ID sent to
-	// the provider, which takes neither the claude- prefix nor the marker.
-	Base string
-}
-
-// newModel splits a configured model name into its base ID, rejecting empty
-// names.
-func newModel(name string) (Model, error) {
-	if name == "" {
-		return Model{}, fmt.Errorf("model name must not be empty")
-	}
-	return Model{Name: name, Base: trimOneMSuffix(name)}, nil
+	// ID is the model ID sent to the provider, verbatim — it may carry "/"
+	// or upper case letters, and no kirocc rewriting applies.
+	ID string
+	// Display is the name requests match on and the gateway advertises
+	// (before the claude- prefix): the alias when one is set, else the ID.
+	Display string
+	// Context1M reports whether the model advertises a 1M context window.
+	Context1M bool
+	// Label is the model picker's display name; empty derives it from
+	// Display.
+	Label string
 }
 
 // trimOneMSuffix strips a trailing [1m] context marker, case-insensitively —
@@ -50,14 +46,13 @@ type Provider struct {
 type Hit struct {
 	Provider  *Provider
 	BaseModel string // model ID to send to the provider
-	// Config1M reports whether the model's configured name carries the [1m]
-	// marker: the context window advertised in /v1/models, regardless of how
-	// the request spelled the ID.
+	// Config1M reports whether the model advertises a 1M context window,
+	// regardless of how the request spelled the ID.
 	Config1M bool
 }
 
-// modelMatch is the registry entry a base name resolves to: the provider and
-// the model declaration as configured.
+// modelMatch is the registry entry a display name resolves to: the provider
+// and the model declaration as configured.
 type modelMatch struct {
 	provider *Provider
 	model    Model
@@ -65,18 +60,20 @@ type modelMatch struct {
 
 // Registry indexes the configured models for request matching.
 type Registry struct {
+	// providers keeps the file's declaration order, which /v1/models and
+	// the load log follow.
 	providers []*Provider
-	// byBase maps a bare model base name ("glm-5.3") to its match.
-	byBase map[string]modelMatch
+	// byDisplay maps a model's display name to its match.
+	byDisplay map[string]modelMatch
 	// mappings holds the session-following rules, keyed by the provider the
 	// session last used.
 	mappings map[string][]Mapping
 }
 
 // Lookup maps a requested model ID to its provider. A model matches when the
-// ID is "claude-" + base, optionally with a trailing [1m] context marker:
-// both claude-glm-5.3 and claude-glm-5.3[1m] hit glm-5.3. Anything else —
-// including unknown claude- IDs — misses and stays on the Kiro path.
+// ID is "claude-" + display name, optionally with a trailing [1m] context
+// marker: both claude-glm-5.3 and claude-glm-5.3[1m] hit glm-5.3. Anything
+// else — including unknown claude- IDs — misses and stays on the Kiro path.
 func (r *Registry) Lookup(model string) (Hit, bool) {
 	if r == nil {
 		return Hit{}, false
@@ -85,24 +82,40 @@ func (r *Registry) Lookup(model string) (Hit, bool) {
 	if !ok {
 		return Hit{}, false
 	}
-	m, ok := r.byBase[rest]
+	m, ok := r.byDisplay[rest]
 	if !ok {
 		return Hit{}, false
 	}
-	return Hit{Provider: m.provider, BaseModel: rest, Config1M: m.model.Name != m.model.Base}, true
+	return Hit{Provider: m.provider, BaseModel: m.model.ID, Config1M: m.model.Context1M}, true
 }
 
-// lookupBase resolves a configured model by its base name — the mapping
-// target spelling — without the claude- prefix.
-func (r *Registry) lookupBase(base string) (Hit, bool) {
+// lookupModel resolves a mapping target: the model with exactly this id in
+// the named provider. Aliases do not match — a mapping target names the id
+// that goes upstream.
+func (r *Registry) lookupModel(providerName, id string) (Hit, bool) {
 	if r == nil {
 		return Hit{}, false
 	}
-	m, ok := r.byBase[base]
-	if !ok {
+	p := r.providerByName(providerName)
+	if p == nil {
 		return Hit{}, false
 	}
-	return Hit{Provider: m.provider, BaseModel: m.model.Base, Config1M: m.model.Name != m.model.Base}, true
+	for _, m := range p.Models {
+		if m.ID == id {
+			return Hit{Provider: p, BaseModel: m.ID, Config1M: m.Context1M}, true
+		}
+	}
+	return Hit{}, false
+}
+
+// providerByName finds a declared provider by name.
+func (r *Registry) providerByName(name string) *Provider {
+	for _, p := range r.providers {
+		if p.Name == name {
+			return p
+		}
+	}
+	return nil
 }
 
 // mappingCount totals the compiled session-following rules.
@@ -116,14 +129,14 @@ func (r *Registry) mappingCount() int {
 
 // ModelInfo is one custom-provider entry for /v1/models.
 type ModelInfo struct {
-	ID          string // exposed ID: "claude-" + configured name
-	DisplayName string // configured model name
+	ID          string // exposed ID: "claude-" + display name (+ "[1m]")
+	DisplayName string // label, or the display name (+ "[1m]")
 	Provider    string
 }
 
-// ListModels returns one entry per configured model, in configuration order.
-// A model written with [1m] in the config is advertised with the marker, so
-// Claude Code's client-side 1M context detection picks it up.
+// ListModels returns one entry per configured model, in declaration order.
+// A model with a 1M context window is advertised with the marker, so Claude
+// Code's client-side 1M context detection picks it up.
 func (r *Registry) ListModels() []ModelInfo {
 	if r == nil {
 		return nil
@@ -131,9 +144,17 @@ func (r *Registry) ListModels() []ModelInfo {
 	var result []ModelInfo
 	for _, p := range r.providers {
 		for _, m := range p.Models {
+			suffix := ""
+			if m.Context1M {
+				suffix = models.ThinkingSuffix
+			}
+			displayName := m.Label
+			if displayName == "" {
+				displayName = m.Display + suffix
+			}
 			result = append(result, ModelInfo{
-				ID:          "claude-" + m.Name,
-				DisplayName: m.Name,
+				ID:          "claude-" + m.Display + suffix,
+				DisplayName: displayName,
 				Provider:    p.Name,
 			})
 		}

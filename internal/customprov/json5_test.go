@@ -307,7 +307,7 @@ func TestJSON5ToJSON_DecodeErrorLineAfterBlockComment(t *testing.T) {
 }
 
 func TestJSON5ToJSON_PlainJSONRoundTrip(t *testing.T) {
-	src := `{"providers":[{"name":"bailian","base_url":"http://p","auth_token":"t","models":["a[1m]","b"]}],"mappings":{"kiro":[{"model":"m","to":{"provider":"kiro","model":"x"}}]}}`
+	src := `{"providers":{"bailian":{"base_url":"http://p","auth_token":"t","models":["a[1m]","b"]}},"kiro":{"mappings":[{"model":"m","to":{"model":"x"}}]}}`
 	converted, err := json5ToJSON([]byte(src))
 	if err != nil {
 		t.Fatalf("conversion: %v", err)

@@ -15,12 +15,13 @@ import (
 func newTestProxy(t *testing.T, upstream *httptest.Server) *Proxy {
 	t.Helper()
 	reg, err := loadTestRegistry(t, `{
-		"providers": [{
-			"name": "bailian",
-			"base_url": "`+upstream.URL+`",
-			"auth_token": "secret-token",
-			"models": ["glm-5.3[1m]"]
-		}]
+		"providers": {
+			"bailian": {
+				"base_url": "`+upstream.URL+`",
+				"auth_token": "secret-token",
+				"models": ["glm-5.3[1m]"]
+			}
+		}
 	}`)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +134,7 @@ func TestForward_ConnectionFailure(t *testing.T) {
 
 	p := newTestProxy(t, httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})))
 	// Point the registry at the closed server.
-	reg, err := loadTestRegistry(t, `{"providers":[{"name":"bailian","base_url":"`+url+`","auth_token":"t","models":["glm-5.3[1m]"]}]}`)
+	reg, err := loadTestRegistry(t, `{"providers":{"bailian":{"base_url":"`+url+`","auth_token":"t","models":["glm-5.3[1m]"]}}}`)
 	if err != nil {
 		t.Fatal(err)
 	}

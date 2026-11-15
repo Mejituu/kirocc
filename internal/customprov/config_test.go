@@ -39,17 +39,24 @@ func loadTestRegistry(t *testing.T, content string) (*Registry, error) {
 	return loadFile(writeConfig(t, content))
 }
 
+// validConfig is the smallest well-formed new-style config.
 const validConfig = `{
-  "providers": [{
-    "name": "bailian",
-    "base_url": "http://provider.test/",
-    "auth_token": "secret-token",
-    "models": ["glm-5.3[1m]", "kimi-k3"]
-  }]
+  "providers": {
+    "bailian": {
+      "base_url": "http://provider.test/",
+      "auth_token": "secret-token",
+      "models": ["glm-5.3[1m]", "kimi-k3"]
+    }
+  }
 }`
 
+// providerEntry builds one provider object's JSON.
+func providerEntry(extra string) string {
+	return `{"base_url":"http://p","auth_token":"t","models":["m"]` + extra + `}`
+}
+
 func TestLoad_ExplicitPathMissing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "missing.json")
+	path := filepath.Join(t.TempDir(), "missing.json5")
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("expected an error for a missing explicitly-configured file")
@@ -90,62 +97,126 @@ func TestLoadFile_ValidationErrors(t *testing.T) {
 	}{
 		{
 			name:    "empty provider name",
-			config:  `{"providers":[{"name":"","base_url":"http://p","auth_token":"t","models":["m"]}]}`,
-			wantErr: "providers[0].name must not be empty",
+			config:  `{"providers": {"": ` + providerEntry("") + `}}`,
+			wantErr: "providers: provider name must not be empty",
 		},
 		{
-			name: "duplicate provider name",
-			config: `{"providers":[
-				{"name":"p","base_url":"http://p","auth_token":"t","models":["m1"]},
-				{"name":"p","base_url":"http://q","auth_token":"t","models":["m2"]}]}`,
-			wantErr: `is declared twice`,
+			name:    "duplicate provider name",
+			config:  `{"providers": {"p": ` + providerEntry("") + `, "p": ` + providerEntry("") + `}}`,
+			wantErr: `duplicate object member name "p"`,
+		},
+		{
+			name:    "provider named kiro",
+			config:  `{"providers": {"kiro": ` + providerEntry("") + `}}`,
+			wantErr: `providers.kiro: "kiro" is reserved`,
 		},
 		{
 			name:    "empty base_url",
-			config:  `{"providers":[{"name":"p","base_url":"","auth_token":"t","models":["m"]}]}`,
-			wantErr: "providers[0].base_url: must not be empty",
+			config:  `{"providers": {"p": {"base_url":"","auth_token":"t","models":["m"]}}}`,
+			wantErr: "providers.p.base_url: must not be empty",
 		},
 		{
 			name:    "non-http scheme",
-			config:  `{"providers":[{"name":"p","base_url":"ftp://example.com","auth_token":"t","models":["m"]}]}`,
+			config:  `{"providers": {"p": {"base_url":"ftp://example.com","auth_token":"t","models":["m"]}}}`,
 			wantErr: `must be an http or https URL`,
 		},
 		{
 			name:    "missing host",
-			config:  `{"providers":[{"name":"p","base_url":"http://","auth_token":"t","models":["m"]}]}`,
+			config:  `{"providers": {"p": {"base_url":"http://","auth_token":"t","models":["m"]}}}`,
 			wantErr: "must include a host",
 		},
 		{
 			name:    "empty auth_token",
-			config:  `{"providers":[{"name":"p","base_url":"http://p","auth_token":"","models":["m"]}]}`,
-			wantErr: "providers[0].auth_token must not be empty",
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"","models":["m"]}}}`,
+			wantErr: "providers.p.auth_token must not be empty",
 		},
 		{
 			name:    "empty models",
-			config:  `{"providers":[{"name":"p","base_url":"http://p","auth_token":"t","models":[]}]}`,
-			wantErr: "providers[0].models must not be empty",
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":[]}}}`,
+			wantErr: "providers.p.models must not be empty",
 		},
 		{
-			name:    "empty model name",
-			config:  `{"providers":[{"name":"p","base_url":"http://p","auth_token":"t","models":[""]}]}`,
-			wantErr: "model name must not be empty",
+			name:    "empty model id in shorthand",
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":[""]}}}`,
+			wantErr: "providers.p.models[0].id must not be empty",
 		},
 		{
-			name: "same model in two providers",
-			config: `{"providers":[
-				{"name":"p1","base_url":"http://p1","auth_token":"t","models":["glm-5.3"]},
-				{"name":"p2","base_url":"http://p2","auth_token":"t","models":["glm-5.3[1m]"]}]}`,
-			wantErr: `model "glm-5.3" is declared by providers "p1" and "p2"`,
+			name:    "empty model id in object",
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":[{"alias":"m"}]}}}`,
+			wantErr: "providers.p.models[0].id must not be empty",
+		},
+		{
+			name:    "object id carrying the 1m marker",
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":[{"id":"m[1m]"}]}}}`,
+			wantErr: "providers.p.models[0].id must not carry the [1m] marker; use context_1m",
+		},
+		{
+			name:    "object alias carrying the 1m marker",
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":[{"id":"m","alias":"a[1m]"}]}}}`,
+			wantErr: "providers.p.models[0].alias must not carry the [1m] marker; use context_1m",
+		},
+		{
+			name: "duplicate model id within a provider",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t",` +
+				`"models":[{"id":"glm-5.3"},{"id":"glm-5.3","alias":"other"}]}}}`,
+			wantErr: `providers.p.models[1].id: "glm-5.3" is declared twice in this provider`,
+		},
+		{
+			name: "same display name in two providers",
+			config: `{"providers": {"p1": {"base_url":"http://p1","auth_token":"t","models":["glm-5.3"]},` +
+				`"p2": {"base_url":"http://p2","auth_token":"t","models":["glm-5.3[1m]"]}}}`,
+			wantErr: `providers.p2.models[0]: display name "glm-5.3" is already exposed by provider "p1"; use an alias`,
 		},
 		{
 			name:    "collision with built-in anthropic id",
-			config:  `{"providers":[{"name":"p","base_url":"http://p","auth_token":"t","models":["sonnet-4-6"]}]}`,
-			wantErr: `expose ID "claude-sonnet-4-6"`,
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":["sonnet-4-6"]}}}`,
+			wantErr: `providers.p.models[0] would expose ID "claude-sonnet-4-6"`,
 		},
 		{
 			name:    "collision with built-in id via 1m suffix form",
-			config:  `{"providers":[{"name":"p","base_url":"http://p","auth_token":"t","models":["zeta-9"]}]}`,
-			wantErr: `expose ID "claude-zeta-9[1m]"`,
+			config:  `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":["zeta-9"]}}}`,
+			wantErr: `providers.p.models[0] would expose ID "claude-zeta-9[1m]"`,
+		},
+		{
+			name: "mapping with empty model",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":["m"],` +
+				`"mappings":[{"to":{"model":"x"}}]}}}`,
+			wantErr: "providers.p.mappings[0].model must not be empty",
+		},
+		{
+			name: "mapping with empty to.model",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":["m"],` +
+				`"mappings":[{"model":"m","to":{"provider":"kiro"}}]}}}`,
+			wantErr: "providers.p.mappings[0].to.model must not be empty",
+		},
+		{
+			name: "mapping with unknown to.provider",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":["m"],` +
+				`"mappings":[{"model":"m","to":{"provider":"nope","model":"x"}}]}}}`,
+			wantErr: `providers.p.mappings[0].to.provider: unknown provider "nope"`,
+		},
+		{
+			name: "mapping target given as alias instead of id",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t",` +
+				`"models":[{"id":"real-id","alias":"pretty"}],` +
+				`"mappings":[{"model":"m","to":{"model":"pretty"}}]}}}`,
+			wantErr: `providers.p.mappings[0].to.model: "pretty" is not a model id of provider "p"; write the model's id, not its alias`,
+		},
+		{
+			name: "duplicate rules in a provider group",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":["m"],` +
+				`"mappings":[{"model":"m","to":{"model":"m"}},{"model":"m","to":{"model":"m"}}]}}}`,
+			wantErr: "providers.p.mappings[1] duplicates an earlier rule",
+		},
+		{
+			name:    "kiro group mapping errors carry the kiro path",
+			config:  `{"kiro": {"mappings":[{"to":{"model":"x"}}]},"providers": {"p": ` + providerEntry("") + `}}`,
+			wantErr: "kiro.mappings[0].model must not be empty",
+		},
+		{
+			name:    "duplicate rules in the kiro group",
+			config:  `{"kiro":{"mappings":[{"model":"m","to":{"model":"x"}},{"model":"m","to":{"model":"y"}}]}}`,
+			wantErr: "kiro.mappings[1] duplicates an earlier rule",
 		},
 	}
 	for _, tt := range tests {
@@ -168,16 +239,63 @@ func TestLoadFile_ValidationErrors(t *testing.T) {
 	}
 }
 
+func TestLoadFile_UnknownMembers(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name:   "top level",
+			config: `{"bogus": 1}`,
+			want:   `unknown object member name "bogus"`,
+		},
+		{
+			name:   "kiro section",
+			config: `{"kiro": {"bogus": 1}}`,
+			want:   `unknown object member name "bogus"`,
+		},
+		{
+			name:   "provider object",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t","models":["m"],"bogus": 1}}}`,
+			want:   `unknown object member name "bogus"`,
+		},
+		{
+			name: "models object",
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t",` +
+				`"models":[{"id":"m","bogus": 1}]}}}`,
+			want: `unknown object member name "bogus"`,
+		},
+		{
+			name:   "mapping rule object",
+			config: `{"kiro": {"mappings":[{"model":"m","to":{"model":"x"},"bogus": 1}]}}`,
+			want:   `unknown object member name "bogus"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFile(writeConfig(t, tt.config))
+			if err == nil {
+				t.Fatalf("expected an unknown-member error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadFile_JSON5Syntax(t *testing.T) {
 	path := writeConfig(t, `{
 		// Providers whose models are forwarded verbatim.
-		providers: [{
-			name: 'bailian',
-			base_url: 'http://provider.test/',
-			auth_token: 'secret-token',
-			count_tokens: false,
-			models: ['glm-5.3[1m]', 'kimi-k3'], /* trailing comma */
-		}],
+		providers: {
+			bailian: {
+				base_url: 'http://provider.test/',
+				auth_token: 'secret-token',
+				count_tokens: false,
+				models: ['glm-5.3[1m]', 'kimi-k3'], /* trailing comma */
+			},
+		},
 	}`)
 	reg, err := loadFile(path)
 	if err != nil {
@@ -197,32 +315,122 @@ func TestLoadFile_JSON5Syntax(t *testing.T) {
 
 func TestLoadFile_DecodeErrorLocation(t *testing.T) {
 	t.Run("syntax error after comments and strings", func(t *testing.T) {
-		// The missing colon sits on line 5, after a comment and a
-		// single-quoted string.
-		src := "{\n  // provider list\n  providers: [{\n    name: 'bailian',\n    url 'x',\n  }],\n}"
+		// The missing colon sits on line 7, after a comment and
+		// single-quoted strings.
+		src := "{\n  // provider list\n  providers: {\n    bailian: {\n      base_url: 'http://p',\n      auth_token: 't',\n      url 'x',\n    },\n  },\n}"
 		_, err := loadFile(writeConfig(t, src))
 		if err == nil {
 			t.Fatal("expected an error for the missing colon")
 		}
-		if !strings.Contains(err.Error(), "invalid JSON5") || !strings.Contains(err.Error(), "line 5,") {
-			t.Errorf("error should locate the original line 5, got: %v", err)
+		if !strings.Contains(err.Error(), "invalid JSON5") || !strings.Contains(err.Error(), "line 7,") {
+			t.Errorf("error should locate the original line 7, got: %v", err)
 		}
 	})
 
 	t.Run("type error keeps the pointer and line", func(t *testing.T) {
-		// count_tokens: 'yes' sits on line 7.
-		src := "{\n  // provider\n  providers: [{\n    name: 'bailian',\n    base_url: 'http://p',\n    auth_token: 't',\n    count_tokens: 'yes',\n    models: ['m'],\n  }],\n}"
+		// The numeric models entry sits on line 7.
+		src := "{\n  // provider\n  providers: {\n    bailian: {\n      base_url: 'http://p',\n      auth_token: 't',\n      models: [42],\n    },\n  },\n}"
 		_, err := loadFile(writeConfig(t, src))
 		if err == nil {
-			t.Fatal("expected an error for the string-typed count_tokens")
+			t.Fatal("expected an error for the numeric models entry")
 		}
 		if !strings.Contains(err.Error(), "line 7,") {
 			t.Errorf("error should locate the original line 7, got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "/providers/0/count_tokens") {
+		if !strings.Contains(err.Error(), "/providers/bailian/models/0") {
 			t.Errorf("error should keep the JSON pointer, got: %v", err)
 		}
 	})
+}
+
+// TestLoadFile_ProviderOrder asserts the file's declaration order survives:
+// the load log and ListModels both follow it, with keys that sort in the
+// opposite order.
+func TestLoadFile_ProviderOrder(t *testing.T) {
+	config := `{
+		"providers": {
+			"zulu": {"base_url":"http://z","auth_token":"t","models":["z-model"]},
+			"mike": {"base_url":"http://m","auth_token":"t","models":["m-model"]},
+			"alpha": {"base_url":"http://a","auth_token":"t","models":["a-model"]}
+		}
+	}`
+	buf := captureSlog(t)
+	reg, err := loadTestRegistry(t, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wantNames []string
+	for _, want := range []string{"zulu", "mike", "alpha"} {
+		wantNames = append(wantNames, want)
+	}
+	got := make([]string, 0, len(reg.providers))
+	for _, p := range reg.providers {
+		got = append(got, p.Name)
+	}
+	if strings.Join(got, ",") != strings.Join(wantNames, ",") {
+		t.Errorf("provider order = %v, want %v", got, wantNames)
+	}
+	logs := buf.String()
+	prev := -1
+	for _, want := range wantNames {
+		idx := strings.Index(logs, `"name":"`+want+`"`)
+		if idx < 0 || idx < prev {
+			t.Errorf("load log out of order for %q; logs:\n%s", want, logs)
+		}
+		prev = idx
+	}
+	var wantIDs []string
+	for _, p := range reg.providers {
+		for _, m := range p.Models {
+			wantIDs = append(wantIDs, "claude-"+m.Display)
+		}
+	}
+	models := reg.ListModels()
+	gotIDs := make([]string, 0, len(models))
+	for _, m := range models {
+		gotIDs = append(gotIDs, m.ID)
+	}
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Errorf("ListModels order = %v, want %v", gotIDs, wantIDs)
+	}
+}
+
+// TestLoadFile_ModelForms asserts both models spellings and their fields.
+func TestLoadFile_ModelForms(t *testing.T) {
+	config := `{
+		"providers": {
+			"p": {
+				"base_url": "http://p",
+				"auth_token": "t",
+				"models": [
+					"kimi-k3[1m]",
+					"plain",
+					{"id": "real-id", "alias": "pretty", "context_1m": true, "label": "Pretty · label"},
+					{"id": "ZHIPU/GLM-5.3"}
+				]
+			}
+		}
+	}`
+	reg, err := loadTestRegistry(t, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := reg.providers[0].Models
+	if len(models) != 4 {
+		t.Fatalf("models = %v, want 4", models)
+	}
+	want := []Model{
+		{ID: "kimi-k3", Display: "kimi-k3", Context1M: true},
+		{ID: "plain", Display: "plain"},
+		{ID: "real-id", Display: "pretty", Context1M: true, Label: "Pretty · label"},
+		{ID: "ZHIPU/GLM-5.3", Display: "ZHIPU/GLM-5.3"},
+	}
+	for i, w := range want {
+		if models[i] != w {
+			t.Errorf("models[%d] = %+v, want %+v", i, models[i], w)
+		}
+	}
 }
 
 func TestLoadFile_BaseURLTrailingSlashTrimmed(t *testing.T) {
@@ -244,7 +452,7 @@ func TestLoadFile_CountTokensDefault(t *testing.T) {
 		{name: "omitted defaults to true", config: validConfig, want: true},
 		{
 			name:   "explicit false",
-			config: `{"providers":[{"name":"p","base_url":"http://p","auth_token":"t","count_tokens":false,"models":["m"]}]}`,
+			config: `{"providers": {"p": {"base_url":"http://p","auth_token":"t","count_tokens":false,"models":["m"]}}}`,
 			want:   false,
 		},
 	}

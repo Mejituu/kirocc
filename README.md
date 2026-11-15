@@ -278,55 +278,77 @@ Optional fields: `kiro_1m` (the SKU a 1M request routes to; set it equal to `kir
 
 ### Custom providers
 
-Requests for models from an Anthropic-compatible provider (e.g. Alibaba Bailian's Anthropic endpoint) can bypass the Kiro conversion entirely and be forwarded verbatim. Declare the provider in a `mejituu.json5` config file:
+Requests for models from an Anthropic-compatible provider (e.g. Alibaba Bailian's Anthropic endpoint) can bypass the Kiro conversion entirely and be forwarded verbatim. Declare the providers in a `mejituu.json5` config file:
 
 ```json5
 {
-  // Providers whose models are forwarded verbatim.
-  providers: [{
-    name: 'bailian',
-    base_url: 'https://llm-xxx.cn-beijing.maas.aliyuncs.com/apps/anthropic',
-    auth_token: 'sk-...',
-    count_tokens: true,
-    models: ['glm-5.3[1m]', 'deepseek-v4.1-flash-1017[1m]', 'kimi-k3[1m]', 'qwen3.8-max[1m]'], // trailing commas are fine
-  }],
+  kiro: {
+    mappings: [
+      {model: 'claude-sonnet-5', thinking: false, stream: false, to: {model: 'claude-haiku-5.5'}},
+    ],
+  },
+  providers: {
+    bailian: {
+      base_url: 'https://llm-xxx.cn-beijing.maas.aliyuncs.com/apps/anthropic',
+      auth_token: 'sk-...',
+      count_tokens: true,
+      models: [
+        {id: 'glm-5.3', context_1m: true, label: 'GLM 5.3 · 百炼'},
+        'kimi-k3[1m]', // the string shorthand for {id: 'kimi-k3', context_1m: true}
+      ],
+      mappings: [
+        {model: 'claude-sonnet-5', thinking: false, stream: false, to: {model: 'deepseek-v4.1-flash-1017'}},
+      ],
+    },
+    zhipu: {
+      base_url: 'https://...',
+      auth_token: '...',
+      models: [ {id: 'glm-5.3', alias: 'glm-5.3-zp', context_1m: true} ],
+    },
+  },
 }
 ```
 
-| Field         | Description                                                                                                     |
-| ------------- | --------------------------------------------------------------------------------------------------------------- |
-| `name`        | Provider name, used in logs and as the `owned_by` of its models in `/v1/models`                                 |
-| `base_url`    | The provider's Anthropic-compatible base URL (http/https, no trailing slash required)                           |
-| `auth_token`  | Sent as `Authorization: Bearer <token>`; never appears in kirocc's logs                                         |
-| `count_tokens`| Optional, defaults to `true`: forward `/v1/messages/count_tokens` to the provider instead of estimating locally |
-| `models`      | Model IDs the provider serves; a trailing `[1m]` advertises a 1M context window                                 |
+Providers is a map keyed by provider name (used in logs and as the `owned_by` of its models in `/v1/models`); `kiro` is reserved. Each provider takes `base_url` (the Anthropic-compatible endpoint, http/https), `auth_token` (sent as `Authorization: Bearer <token>`; never appears in kirocc's logs), `count_tokens` (optional, defaults to `true`: forward `/v1/messages/count_tokens` to the provider instead of estimating locally), `models`, and `mappings`. Declaration order is preserved: `/v1/models` and the load log list providers and models as written.
 
-By default the config is read from `mejituu.json5` next to the real executable (symlinks such as `~/.local/bin/kirocc → dist/kirocc` resolve to the real file's directory); pass `-config <path>` to point elsewhere (`go run` needs this). A missing default file simply disables the feature; an explicitly given path, invalid JSON5, or a validation error fails startup. The file should not be group/world readable (`chmod 600`). The config is JSON5: line and block comments, trailing commas, unquoted keys, single-quoted strings, hexadecimal numbers, and JSON5 string escapes (`\x`, `\0`, `\v`, line continuations) are supported; `Infinity` and `NaN` are not — standard JSON cannot represent them.
+Each `models` entry is either the string shorthand (`'kimi-k3[1m]'` means `{id: 'kimi-k3', context_1m: true}`) or an object:
 
-Each configured model is exposed to Claude Code as `claude-<name>` — `glm-5.3[1m]` becomes `claude-glm-5.3[1m]`, listed in the `/model` picker. A request whose model is `claude-glm-5.3` or `claude-glm-5.3[1m]` is routed to that provider with the model name rewritten to `glm-5.3`; every other model keeps going through Kiro. Model names must not collide with built-in kirocc IDs.
+| Field        | Description                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------------- |
+| `id`         | Required. The model ID sent to the provider, verbatim (slashes and case included); must be unique within the provider |
+| `alias`      | Optional, defaults to `id`. The name requests match on and the gateway lists                          |
+| `context_1m` | Optional, defaults to `false`. Advertises a 1M context window, adding `[1m]` to the exposed ID        |
+| `label`      | Optional. The `/model` picker's display name; defaults to the alias (with `[1m]` when 1M)            |
+
+Exposed IDs are `claude-<alias>` (`claude-glm-5.3[1m]` when 1M). A request whose model is `claude-glm-5.3` or `claude-glm-5.3[1m]` is routed to that provider with the model name rewritten to the model's `id`; every other model keeps going through Kiro. Aliases must be unique across providers and must not collide with built-in kirocc IDs.
+
+By default the config is read from `mejituu.json5` next to the real executable (symlinks such as `~/.local/bin/kirocc → dist/kirocc` resolve to the real file's directory); pass `-config <path>` to point elsewhere (`go run` needs this). A missing default file simply disables the feature; an explicitly given path, invalid JSON5, or a validation error fails startup — errors point at the original file's line and column. The file should not be group/world readable (`chmod 600`). The config is JSON5: line and block comments, trailing commas, unquoted keys, single-quoted strings, hexadecimal numbers, and JSON5 string escapes (`\x`, `\0`, `\v`, line continuations) are supported; `Infinity` and `NaN` are not — standard JSON cannot represent them. Unknown fields are rejected at every level, so a misspelled key fails startup instead of being ignored.
 
 For a custom-provider request, kirocc acts as a transparent pipe: the request body is forwarded with only the `model` field rewritten (unknown fields, key order, and number spellings are preserved), and the provider's response — status, headers, body, streaming SSE — is passed through unchanged. Client credentials (`Authorization`, `X-Api-Key`, `Cookie`) are never forwarded; `Content-Type`, `Accept`, `User-Agent`, and `Anthropic-*` headers are. Nothing Kiro-specific runs on this path: no model resolution, no server-side tool emulation (`web_search` etc. must be supported by the provider itself), no usage/credit accounting, no SSE keep-alive.
 
 #### Session-following model mappings
 
-Claude Code's background classifier sends small requests (`model=claude-sonnet-5`, no thinking, non-streaming) under the main conversation's session ID. Mappings let those follow the provider the conversation uses, with the model rewritten per rule:
+Claude Code's background classifier sends small requests (`model=claude-sonnet-5`, no thinking, non-streaming) under the main conversation's session ID. Mappings let those follow the provider the conversation uses, with the model rewritten per rule. Rules for sessions that last used Kiro live in `kiro.mappings`; rules for a provider's sessions in that provider's `mappings`. A rule's `to.provider` may be omitted — it defaults to `kiro` in `kiro.mappings` and to the provider itself in `providers.<name>.mappings`:
 
 ```json5
 {
-  providers: [ /* as above */ ],
-  mappings: {
-    kiro: [
-      {model: 'claude-sonnet-5', thinking: false, stream: false, to: {provider: 'kiro', model: 'claude-haiku-5.5'}},
+  kiro: {
+    mappings: [
+      {model: 'claude-sonnet-5', thinking: false, stream: false, to: {model: 'claude-haiku-5.5'}},
     ],
-    bailian: [
-      {model: 'claude-sonnet-5', thinking: false, stream: false, to: {provider: 'bailian', model: 'deepseek-v4.1-flash-1017'}},
-      {model: 'claude-opus-5-5', to: {provider: 'bailian', model: 'ZHIPU/GLM-5.3'}},
-    ],
+  },
+  providers: {
+    bailian: {
+      /* base_url, auth_token, models … */
+      mappings: [
+        {model: 'claude-sonnet-5', thinking: false, stream: false, to: {model: 'deepseek-v4.1-flash-1017'}},
+      ],
+    },
   },
 }
 ```
 
-Each mappings group is keyed by the provider the session last used — `kiro`, or a declared provider name (`kiro` is reserved and cannot be a provider name). Within a group, rules match in order and the first hit wins. A rule's `model` is compared with the `[1m]` marker ignored on both sides, case-sensitively otherwise; `thinking` and `stream` are optional filters — omitting one matches either value, and `thinking` only looks at `thinking.type` (the `[1m]` marker never counts as thinking). `to.model` is used verbatim, slashes and case included (`ZHIPU/GLM-5.3`); for a custom provider it must be one of that provider's configured models (checked at startup), while a `kiro` target is checked per request against kirocc's model table.
+Within a group, rules match in order and the first hit wins. A rule's `model` is compared with the `[1m]` marker ignored on both sides, case-sensitively otherwise; `thinking` and `stream` are optional filters — omitting one matches either value, and `thinking` only looks at `thinking.type` (the `[1m]` marker never counts as thinking). `to.model` is used verbatim: a `kiro` target is checked per request against kirocc's model table, while a custom target must be exactly one of that provider's model **ids** (aliases are rejected) and is checked at startup.
 
 A session's provider is set by its most recent unmapped `POST /v1/messages` request carrying the `X-Claude-Code-Session-Id` header — custom-model requests record their provider, everything else records `kiro`. Mapped requests never change the session's provider, and a session with no record yet is never mapped. `POST /v1/messages/count_tokens` neither reads nor writes the session table and is never mapped. When a mapping's target turns out unknown, kirocc warns (`model mapping target unknown`) and routes the request normally without touching the session.
 

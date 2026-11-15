@@ -15,12 +15,13 @@ import (
 func TestGetModels_CustomProviderModels(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mejituu.json5")
 	if err := os.WriteFile(path, []byte(`{
-		"providers": [{
-			"name": "bailian",
-			"base_url": "http://provider.test",
-			"auth_token": "t",
-			"models": ["glm-5.3[1m]", "kimi-k3"]
-		}]
+		"providers": {
+			"bailian": {
+				"base_url": "http://provider.test",
+				"auth_token": "t",
+				"models": ["glm-5.3[1m]", "kimi-k3", {"id": "real-id", "alias": "pretty", "context_1m": true, "label": "Pretty · label"}]
+			}
+		}
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +76,11 @@ func TestGetModels_CustomProviderModels(t *testing.T) {
 	}
 	if displayName["claude-glm-5.3[1m]"] != "glm-5.3[1m]" || displayName["claude-kimi-k3"] != "kimi-k3" {
 		t.Errorf("custom display_name = %v / %v", displayName["claude-glm-5.3[1m]"], displayName["claude-kimi-k3"])
+	}
+	// A model with a label shows it verbatim; one without derives it from
+	// the display name, and its context_1m adds the marker.
+	if displayName["claude-pretty[1m]"] != "Pretty · label" {
+		t.Errorf("labeled display_name = %q, want \"Pretty · label\"", displayName["claude-pretty[1m]"])
 	}
 	// A built-in entry must still be listed, and custom entries must come
 	// after the built-in ones.

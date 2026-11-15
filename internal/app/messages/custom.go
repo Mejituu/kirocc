@@ -105,7 +105,7 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 				} else {
 					slog.WarnContext(ctx, "model mapping target unknown", "trace_id", short, "to_model", mapping.ModelTo)
 				}
-			} else if hit, ok := s.custom.LookupBase(mapping.ModelTo); ok {
+			} else if hit, ok := s.custom.LookupModel(mapping.Provider, mapping.ModelTo); ok {
 				debugRequestLogs(ctx, traceID, endpoint, r, raw)
 				s.custom.Forward(ctx, w, r.Header, raw, hit, peek, endpoint)
 				return true
