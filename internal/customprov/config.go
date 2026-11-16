@@ -32,6 +32,11 @@ type fileConfig struct {
 
 // kiroSection holds the rules applied to sessions that last used Kiro.
 type kiroSection struct {
+	// WebSearchFallback is the model a search request from a Kiro session
+	// falls back to; the provider must be named explicitly, since Kiro
+	// itself cannot search.
+	WebSearchFallback *mappingTarget `json:"web_search_fallback,omitempty"`
+
 	Mappings []mappingRule `json:"mappings,omitempty"`
 }
 
@@ -86,6 +91,11 @@ type providerConfig struct {
 	Models      []modelEntry `json:"models"`
 	Protocol    string       `json:"protocol,omitempty"` // empty means anthropic
 
+	// WebSearchFallback is the model a search request falls back to when
+	// this provider's requested model does not run web_search itself; an
+	// omitted provider names this provider.
+	WebSearchFallback *mappingTarget `json:"web_search_fallback,omitempty"`
+
 	// Mappings are the session-following rules for this provider's
 	// sessions; a separate group keeps the field alignment stable.
 	Mappings []mappingRule `json:"mappings,omitempty"`
@@ -135,8 +145,10 @@ type mappingRule struct {
 	To        mappingTarget `json:"to"`
 }
 
-// mappingTarget is the rule's destination. An empty Provider takes the
-// group's default: kiro for kiro.mappings, the group's provider otherwise.
+// mappingTarget is a mapping rule's destination, and a web_search_fallback
+// entry's. An empty Provider takes the group's default: kiro for
+// kiro.mappings, the group's provider otherwise. A web_search_fallback
+// applies the same default but never accepts kiro, which cannot search.
 type mappingTarget struct {
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model"`
@@ -309,6 +321,24 @@ func buildRegistry(path string, fc fileConfig) (*Registry, error) {
 		registry.providers = append(registry.providers, p)
 	}
 
+	// Web search fallbacks compile after every provider is registered, for
+	// the same reason as the mappings below: the target may be declared
+	// later in the file. Provider groups come first, then kiro.
+	for _, p := range registry.providers {
+		fb, err := compileWebSearchFallback(path, "providers."+p.Name, fc.Providers.entries[p.Name].WebSearchFallback, p.Name, registry)
+		if err != nil {
+			return nil, err
+		}
+		p.WebSearchFallback = fb
+	}
+	if fc.Kiro != nil {
+		fb, err := compileWebSearchFallback(path, "kiro", fc.Kiro.WebSearchFallback, KiroProviderName, registry)
+		if err != nil {
+			return nil, err
+		}
+		registry.KiroWebSearchFallback = fb
+	}
+
 	// Mappings compile only after every provider is registered: a rule may
 	// target a provider declared later in the file, or a custom provider
 	// from kiro.mappings. Provider groups compile in declaration order,
@@ -437,6 +467,55 @@ func compileMappings(path, groupLoc string, rules []mappingRule, defaultProvider
 		compiled = append(compiled, m)
 	}
 	return compiled, nil
+}
+
+// WebSearchFallbackTarget names the model a group's search requests fall
+// back to: the provider and the model id. An entry that left provider
+// empty has already resolved to the group's own provider.
+type WebSearchFallbackTarget struct {
+	// Provider is the target provider's declared name; never "kiro", which
+	// cannot search.
+	Provider string
+	// Model is the target model's id, not its alias, and it enables
+	// web_search.
+	Model string
+}
+
+// compileWebSearchFallback validates and compiles one group's
+// web_search_fallback entry. groupLoc is the error-path prefix
+// ("providers.bailian" or "kiro"); defaultProvider is the target when the
+// entry leaves provider empty — the group's own provider, or kiro for the
+// kiro section, where the entry must then name a provider explicitly. Like
+// compileMappings it runs after every provider is registered, so the target
+// may be declared later in the file.
+func compileWebSearchFallback(path, groupLoc string, t *mappingTarget, defaultProvider string, registry *Registry) (*WebSearchFallbackTarget, error) {
+	if t == nil {
+		return nil, nil
+	}
+	provider := t.Provider
+	if provider == "" {
+		provider = defaultProvider
+	}
+	// The fallback hands the search to the target's native web_search,
+	// which Kiro does not run — the target must be a custom provider.
+	if provider == KiroProviderName {
+		return nil, fmt.Errorf("%s: %s.web_search_fallback.provider: kiro cannot search; the fallback must name a custom provider", path, groupLoc)
+	}
+	p := registry.providerByName(provider)
+	if p == nil {
+		return nil, fmt.Errorf("%s: %s.web_search_fallback.provider: unknown provider %q", path, groupLoc, provider)
+	}
+	// The target model must be the provider's id, not its alias.
+	if !p.hasModelID(t.Model) {
+		return nil, fmt.Errorf("%s: %s.web_search_fallback.model: %q is not a model id of provider %q", path, groupLoc, t.Model, provider)
+	}
+	// The fallback reroutes a search request, so the target model must
+	// itself run web_search natively; hasModelID has already vouched for
+	// the id, so the nil arm is a guard only.
+	if m := p.modelByID(t.Model); m == nil || !m.WebSearch {
+		return nil, fmt.Errorf("%s: %s.web_search_fallback.model: %q does not enable web_search", path, groupLoc, t.Model)
+	}
+	return &WebSearchFallbackTarget{Provider: provider, Model: t.Model}, nil
 }
 
 // modelByID returns the model declaration with exactly this id — the

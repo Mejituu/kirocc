@@ -311,7 +311,7 @@ Requests for models from an Anthropic-compatible provider (e.g. Alibaba Bailian'
 }
 ```
 
-Providers is a map keyed by provider name (used in logs and as the `owned_by` of its models in `/v1/models`); `kiro` is reserved. Each provider takes `base_url` (the Anthropic-compatible endpoint, http/https), `auth_token` (sent as `Authorization: Bearer <token>`; never appears in kirocc's logs), `count_tokens` (optional, defaults to `true`: forward `/v1/messages/count_tokens` to the provider instead of estimating locally; with `protocol: 'openai'` it defaults to `false` and must not be `true` — OpenAI-protocol providers have no count_tokens endpoint, so kirocc always estimates locally), `protocol` (optional, defaults to `'anthropic'`: forward the Messages API request verbatim; `'openai'` converts it to the OpenAI Chat Completions protocol and converts the response back), `models`, and `mappings`. Declaration order is preserved: `/v1/models` and the load log list providers and models as written.
+Providers is a map keyed by provider name (used in logs and as the `owned_by` of its models in `/v1/models`); `kiro` is reserved. Each provider takes `base_url` (the Anthropic-compatible endpoint, http/https), `auth_token` (sent as `Authorization: Bearer <token>`; never appears in kirocc's logs), `count_tokens` (optional, defaults to `true`: forward `/v1/messages/count_tokens` to the provider instead of estimating locally; with `protocol: 'openai'` it defaults to `false` and must not be `true` — OpenAI-protocol providers have no count_tokens endpoint, so kirocc always estimates locally), `protocol` (optional, defaults to `'anthropic'`: forward the Messages API request verbatim; `'openai'` converts it to the OpenAI Chat Completions protocol and converts the response back), `models`, `mappings`, and `web_search_fallback`. Declaration order is preserved: `/v1/models` and the load log list providers and models as written.
 
 Each `models` entry is either the string shorthand (`'kimi-k3[1m]'` means `{id: 'kimi-k3', context_1m: true}`) or an object:
 
@@ -365,6 +365,42 @@ Within a group, rules match in order and the first hit wins. A rule's `model` is
 where `qwen3.8-max` is a model of the target provider declared with `web_search: true`. `to.model` is used verbatim: a `kiro` target is checked per request against kirocc's model table, while a custom target must be exactly one of that provider's model **ids** (aliases are rejected) and is checked at startup. A `web_search` rule with a custom target must point at a model declared with `web_search: true` — a model without the flag will not search — under the same startup check; `kiro` targets are not validated.
 
 A session's provider is set by its most recent unmapped `POST /v1/messages` request carrying the `X-Claude-Code-Session-Id` header — custom-model requests record their provider, everything else records `kiro`. Mapped requests never change the session's provider, and a session with no record yet is never mapped. `POST /v1/messages/count_tokens` neither reads nor writes the session table and is never mapped. When a mapping's target turns out unknown, kirocc warns (`model mapping target unknown`) and routes the request normally without touching the session.
+
+#### Web search fallback
+
+A model without `web_search: true` is forwarded as before and will not search, and Kiro models have no search at all. `web_search_fallback` routes those requests to a model that can: an optional field on each provider section and on `kiro`, in the same shape as a mapping target:
+
+```json5
+{
+  kiro: {
+    // Kiro cannot search: requests for its models that carry the
+    // web_search tool are answered by the fallback model instead.
+    web_search_fallback: {provider: 'bailian', model: 'qwen3.8-max'},
+  },
+  providers: {
+    bailian: {
+      /* base_url, auth_token … */
+      models: [
+        {id: 'glm-5.3', context_1m: true},     // no web_search
+        {id: 'qwen3.8-max', web_search: true}, // the fallback target
+      ],
+      // provider omitted: defaults to bailian itself
+      web_search_fallback: {model: 'qwen3.8-max'},
+    },
+  },
+}
+```
+
+As with a mapping target, `model` must be exactly one of the target provider's model **ids** (aliases are rejected), and `provider` may be omitted in a provider section, defaulting to that provider. The `kiro` section has no provider of its own, so there `provider` must be written out. `kiro` is not a valid target in either place — Kiro cannot search. Targets are checked at startup: the model must exist and be declared `web_search: true`, or startup fails.
+
+For a request carrying the `web_search` tool, kirocc picks where it is answered in this order:
+
+1. A session-following mapping rule matches the request — the mapping wins, and the fallback never applies.
+2. The requested model itself declares `web_search: true` — the request is forwarded to it as usual, native search included.
+3. The fallback — only on `/v1/messages` and only when no mapping matched: a custom model without `web_search` whose provider declares a fallback is forwarded to the fallback model, and a request for a Kiro model is forwarded likewise when the `kiro` section declares one, taking it before the proxy-side [Web Search](#web-search) implementation runs.
+4. Otherwise the existing behavior — requests without the `web_search` tool are entirely unaffected, and `POST /v1/messages/count_tokens` never falls back.
+
+A fallback forward is an ordinary custom forward with the model rewritten to the fallback model, so it gets that model's native search. Like a mapped request, it never updates the session's provider — the conversation keeps recording the provider its unmapped requests use, so later background requests still follow it. Each fallback is logged (`web search fallback`) with the from and to provider and model.
 
 ## Endpoints
 

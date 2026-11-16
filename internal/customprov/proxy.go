@@ -92,6 +92,29 @@ func (p *Proxy) LookupModel(providerName, id string) (Hit, bool) {
 	return p.registry.lookupModel(providerName, id)
 }
 
+// WebSearchFallbackHit resolves the fallback target for a request whose
+// model is the given provider's and does not search: the target model's
+// Hit (WebSearch true, guaranteed by startup validation), or false when
+// the provider declares no fallback.
+func (p *Proxy) WebSearchFallbackHit(providerName string) (Hit, bool) {
+	if p == nil || p.registry == nil {
+		return Hit{}, false
+	}
+	prov := p.registry.providerByName(providerName)
+	if prov == nil || prov.WebSearchFallback == nil {
+		return Hit{}, false
+	}
+	return p.LookupModel(prov.WebSearchFallback.Provider, prov.WebSearchFallback.Model)
+}
+
+// KiroWebSearchFallbackHit resolves the kiro-section fallback the same way.
+func (p *Proxy) KiroWebSearchFallbackHit() (Hit, bool) {
+	if p == nil || p.registry == nil || p.registry.KiroWebSearchFallback == nil {
+		return Hit{}, false
+	}
+	return p.LookupModel(p.registry.KiroWebSearchFallback.Provider, p.registry.KiroWebSearchFallback.Model)
+}
+
 // MatchMapping resolves the session-following mapping for a request: the
 // session's provider comes from the session table, then the first matching
 // rule of that provider's group wins. The session provider is returned for

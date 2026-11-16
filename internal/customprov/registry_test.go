@@ -1,6 +1,9 @@
 package customprov
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func testRegistry(t *testing.T) *Registry {
 	t.Helper()
@@ -73,5 +76,114 @@ func TestListModels(t *testing.T) {
 	}
 	if models[1].ID != "claude-kimi-k3" {
 		t.Errorf("models[1].ID = %q, want claude-kimi-k3", models[1].ID)
+	}
+}
+
+// fallbackTestRegistry builds the registry by hand: the config-level fallback
+// wiring lands with the config work, and these tests need no more than the
+// fields themselves. bailian's models do not search, so bailian declares a
+// fallback to searchy's web-search model.
+func fallbackTestRegistry() *Registry {
+	return &Registry{
+		providers: []*Provider{
+			{
+				Name:     "bailian",
+				BaseURL:  "https://bailian.example",
+				Protocol: ProtocolAnthropic,
+				Models:   []Model{{ID: "glm-5.3", Display: "glm-5.3"}},
+				WebSearchFallback: &WebSearchFallbackTarget{
+					Provider: "searchy",
+					Model:    "web-model",
+				},
+			},
+			{
+				Name:     "searchy",
+				BaseURL:  "https://searchy.example",
+				Protocol: ProtocolOpenAI,
+				Models:   []Model{{ID: "web-model", Display: "web-model", WebSearch: true}},
+			},
+		},
+	}
+}
+
+func TestWebSearchFallbackHit(t *testing.T) {
+	p := NewProxy(fallbackTestRegistry(), time.Second)
+
+	hit, ok := p.WebSearchFallbackHit("bailian")
+	if !ok {
+		t.Fatal("WebSearchFallbackHit(bailian) missed, want hit")
+	}
+	if !hit.WebSearch {
+		t.Error("hit.WebSearch = false, want true")
+	}
+	if hit.BaseModel != "web-model" {
+		t.Errorf("BaseModel = %q, want web-model", hit.BaseModel)
+	}
+	if hit.Provider.Name != "searchy" {
+		t.Errorf("Provider.Name = %q, want searchy", hit.Provider.Name)
+	}
+
+	// A provider without a fallback, and an unknown provider, both miss.
+	if _, ok := p.WebSearchFallbackHit("searchy"); ok {
+		t.Error("WebSearchFallbackHit(searchy) hit, want miss (no fallback)")
+	}
+	if _, ok := p.WebSearchFallbackHit("nope"); ok {
+		t.Error("WebSearchFallbackHit(nope) hit, want miss (unknown provider)")
+	}
+}
+
+// TestWebSearchFallbackHit_DanglingTarget: startup validation keeps fallback
+// targets real, but a query must still miss quietly — not panic — when one
+// slips through.
+func TestWebSearchFallbackHit_DanglingTarget(t *testing.T) {
+	reg := fallbackTestRegistry()
+	reg.providers[0].WebSearchFallback = &WebSearchFallbackTarget{Provider: "searchy", Model: "missing"}
+	p := NewProxy(reg, time.Second)
+	if _, ok := p.WebSearchFallbackHit("bailian"); ok {
+		t.Error("WebSearchFallbackHit with a dangling target hit, want miss")
+	}
+}
+
+func TestKiroWebSearchFallbackHit(t *testing.T) {
+	reg := fallbackTestRegistry()
+	reg.KiroWebSearchFallback = &WebSearchFallbackTarget{Provider: "searchy", Model: "web-model"}
+	p := NewProxy(reg, time.Second)
+
+	hit, ok := p.KiroWebSearchFallbackHit()
+	if !ok {
+		t.Fatal("KiroWebSearchFallbackHit() missed, want hit")
+	}
+	if !hit.WebSearch {
+		t.Error("hit.WebSearch = false, want true")
+	}
+	if hit.BaseModel != "web-model" {
+		t.Errorf("BaseModel = %q, want web-model", hit.BaseModel)
+	}
+	if hit.Provider.Name != "searchy" {
+		t.Errorf("Provider.Name = %q, want searchy", hit.Provider.Name)
+	}
+
+	// A registry without the kiro-section fallback misses.
+	if _, ok := NewProxy(fallbackTestRegistry(), time.Second).KiroWebSearchFallbackHit(); ok {
+		t.Error("KiroWebSearchFallbackHit without a kiro fallback hit, want miss")
+	}
+}
+
+// TestWebSearchFallbackHit_NilGuards: a nil proxy or a nil registry (custom
+// providers disabled) misses instead of panicking.
+func TestWebSearchFallbackHit_NilGuards(t *testing.T) {
+	var p *Proxy
+	if _, ok := p.WebSearchFallbackHit("bailian"); ok {
+		t.Error("nil proxy WebSearchFallbackHit hit, want miss")
+	}
+	if _, ok := p.KiroWebSearchFallbackHit(); ok {
+		t.Error("nil proxy KiroWebSearchFallbackHit hit, want miss")
+	}
+	p = NewProxy(nil, time.Second)
+	if _, ok := p.WebSearchFallbackHit("bailian"); ok {
+		t.Error("nil registry WebSearchFallbackHit hit, want miss")
+	}
+	if _, ok := p.KiroWebSearchFallbackHit(); ok {
+		t.Error("nil registry KiroWebSearchFallbackHit hit, want miss")
 	}
 }

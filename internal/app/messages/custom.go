@@ -123,11 +123,50 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 
 	hit, ok := s.custom.Lookup(peek.Model)
 	if !ok {
+		// A Kiro-routed (or unknown) model with a web_search request falls
+		// back to the configured web-search target when the kiro section
+		// names one. Like the mapping path, the fallback request does not
+		// update the session's provider; count_tokens never falls back.
+		if endpoint == customprov.EndpointMessages && peek.HasWebSearch() {
+			if fallbackHit, ok := s.custom.KiroWebSearchFallbackHit(); ok {
+				slog.InfoContext(ctx, "web search fallback",
+					"trace_id", short,
+					"session_id", logging.ShortID(ccSessionID),
+					"from_provider", customprov.KiroProviderName,
+					"from_model", peek.Model,
+					"to_provider", fallbackHit.Provider.Name,
+					"to_model", fallbackHit.BaseModel,
+				)
+				debugRequestLogs(ctx, traceID, endpoint, r, raw)
+				s.custom.Forward(ctx, w, r.Header, raw, fallbackHit, peek, endpoint)
+				return true
+			}
+		}
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 		if recordSession {
 			s.custom.RecordSession(ccSessionID, customprov.KiroProviderName)
 		}
 		return false
+	}
+
+	// A custom model without native web_search redirects a web_search request
+	// to its provider's fallback target. Like the mapping path this records
+	// no session and skips the local count_tokens estimate: the request
+	// forwards as the fallback model.
+	if !hit.WebSearch && endpoint == customprov.EndpointMessages && peek.HasWebSearch() {
+		if fallbackHit, ok := s.custom.WebSearchFallbackHit(hit.Provider.Name); ok {
+			slog.InfoContext(ctx, "web search fallback",
+				"trace_id", short,
+				"session_id", logging.ShortID(ccSessionID),
+				"from_provider", hit.Provider.Name,
+				"from_model", hit.BaseModel,
+				"to_provider", fallbackHit.Provider.Name,
+				"to_model", fallbackHit.BaseModel,
+			)
+			debugRequestLogs(ctx, traceID, endpoint, r, raw)
+			s.custom.Forward(ctx, w, r.Header, raw, fallbackHit, peek, endpoint)
+			return true
+		}
 	}
 
 	debugRequestLogs(ctx, traceID, endpoint, r, raw)

@@ -52,6 +52,10 @@ type Provider struct {
 	// keeps the field alignment above stable.
 	Protocol Protocol
 
+	// WebSearchFallback names the model search requests fall back to when the
+	// requested model of this provider does not search; nil = no fallback.
+	WebSearchFallback *WebSearchFallbackTarget
+
 	// authToken is unexported so it cannot leak into logs or JSON dumps.
 	authToken string
 }
@@ -90,6 +94,9 @@ type Registry struct {
 	// mappings holds the session-following rules, keyed by the provider the
 	// session last used.
 	mappings map[string][]Mapping
+	// KiroWebSearchFallback routes search requests whose target is a Kiro
+	// model to a custom model; nil = no fallback.
+	KiroWebSearchFallback *WebSearchFallbackTarget
 }
 
 // Lookup maps a requested model ID to its provider. A model matches when the

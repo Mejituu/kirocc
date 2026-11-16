@@ -811,6 +811,129 @@ func TestLoadMappingWebSearchCondition(t *testing.T) {
 	}
 }
 
+// TestLoadWebSearchFallback covers the web_search_fallback entry: an
+// omitted provider targets the group's own provider, an explicit one may be
+// declared later in the file, and the kiro section has no default at all.
+// The target must be a declared provider, one of its model ids, and
+// web_search-enabled — never kiro itself, which cannot search.
+func TestLoadWebSearchFallback(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   string
+		wantErrs []string
+		onKiro   bool
+		want     *WebSearchFallbackTarget
+	}{
+		{
+			name: "omitted provider targets the provider itself",
+			config: `{"providers":{"p":{
+				"base_url":"http://p","auth_token":"t",
+				"models":[{"id":"m"},{"id":"qwen3.8-max","web_search":true}],
+				"web_search_fallback":{"model":"qwen3.8-max"}
+			}}}`,
+			want: &WebSearchFallbackTarget{Provider: "p", Model: "qwen3.8-max"},
+		},
+		{
+			name: "explicit cross-provider target declared later in the file",
+			config: `{"providers":{
+				"a":{"base_url":"http://a","auth_token":"t","models":["m"],
+					"web_search_fallback":{"provider":"b","model":"s"}},
+				"b":{"base_url":"http://b","auth_token":"t","models":[{"id":"s","web_search":true}]}
+			}}`,
+			want: &WebSearchFallbackTarget{Provider: "b", Model: "s"},
+		},
+		{
+			name: "target model without web_search",
+			config: `{"providers":{"p":{
+				"base_url":"http://p","auth_token":"t","models":["m"],
+				"web_search_fallback":{"model":"m"}
+			}}}`,
+			wantErrs: []string{`providers.p.web_search_fallback.model: "m" does not enable web_search`},
+		},
+		{
+			name: "unknown target provider",
+			config: `{"providers":{"p":{
+				"base_url":"http://p","auth_token":"t","models":["m"],
+				"web_search_fallback":{"provider":"nope","model":"m"}
+			}}}`,
+			wantErrs: []string{`providers.p.web_search_fallback.provider: unknown provider "nope"`},
+		},
+		{
+			name: "unknown target model",
+			config: `{"providers":{"p":{
+				"base_url":"http://p","auth_token":"t","models":["m"],
+				"web_search_fallback":{"model":"x"}
+			}}}`,
+			wantErrs: []string{`providers.p.web_search_fallback.model: "x" is not a model id of provider "p"`},
+		},
+		{
+			name:     "kiro section without a provider",
+			config:   `{"kiro":{"web_search_fallback":{"model":"qwen3.8-max"}}}`,
+			wantErrs: []string{"kiro.web_search_fallback.provider: kiro cannot search; the fallback must name a custom provider"},
+		},
+		{
+			name:     "kiro section naming kiro",
+			config:   `{"kiro":{"web_search_fallback":{"provider":"kiro","model":"x"}}}`,
+			wantErrs: []string{"kiro.web_search_fallback.provider: kiro cannot search; the fallback must name a custom provider"},
+		},
+		{
+			name: "provider section naming kiro",
+			config: `{"providers":{"p":{
+				"base_url":"http://p","auth_token":"t","models":["m"],
+				"web_search_fallback":{"provider":"kiro","model":"x"}
+			}}}`,
+			wantErrs: []string{"providers.p.web_search_fallback.provider: kiro cannot search; the fallback must name a custom provider"},
+		},
+		{
+			name: "kiro section with an explicit custom provider",
+			config: `{"kiro":{"web_search_fallback":{"provider":"p","model":"qwen3.8-max"}},
+				"providers":{"p":{"base_url":"http://p","auth_token":"t","models":[{"id":"qwen3.8-max","web_search":true}]}}}`,
+			onKiro: true,
+			want:   &WebSearchFallbackTarget{Provider: "p", Model: "qwen3.8-max"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg, err := loadTestRegistry(t, tt.config)
+			if len(tt.wantErrs) > 0 {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+				for _, want := range tt.wantErrs {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %v, want it to contain %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := reg.KiroWebSearchFallback
+			if !tt.onKiro {
+				got = reg.providers[0].WebSearchFallback
+			}
+			switch {
+			case tt.want == nil && got != nil:
+				t.Errorf("WebSearchFallback = %+v, want nil", got)
+			case tt.want != nil && (got == nil || *got != *tt.want):
+				t.Errorf("WebSearchFallback = %+v, want %+v", got, *tt.want)
+			}
+		})
+	}
+
+	t.Run("no fallback configured stays nil", func(t *testing.T) {
+		reg, err := loadTestRegistry(t, validConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reg.providers[0].WebSearchFallback != nil || reg.KiroWebSearchFallback != nil {
+			t.Errorf("fallbacks = %+v/%+v, want nil/nil",
+				reg.providers[0].WebSearchFallback, reg.KiroWebSearchFallback)
+		}
+	})
+}
+
 func TestLoadFile_PermissionWarning(t *testing.T) {
 	buf := captureSlog(t)
 	path := filepath.Join(t.TempDir(), "mejituu.json5")
