@@ -38,18 +38,24 @@ func (p *Proxy) forwardOpenAI(ctx context.Context, w http.ResponseWriter, h http
 	// Server-side tools (web_search, tool_search, advisor) execute in the
 	// Anthropic backend, which an OpenAI-protocol provider cannot stand in
 	// for. Fail the request up front instead of sending one that can only
-	// fail downstream. A decode error is left to buildOpenAIRequest, the
+	// fail downstream. Web_search is the one exception: a model that declared
+	// it (hit) hands the tool to the provider's native search via
+	// enable_search below. A decode error is left to buildOpenAIRequest, the
 	// authoritative parser below.
 	var toolPeek struct {
 		Tools []anthropic.Tool `json:"tools,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &toolPeek); err == nil {
 		for i := range toolPeek.Tools {
-			if toolPeek.Tools[i].IsServerTool() {
-				httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest,
-					"OpenAI-protocol custom providers do not support server-side tools; use an anthropic-protocol provider or disallow the tool (e.g. claude --disallowedTools WebSearch)")
-				return
+			if !toolPeek.Tools[i].IsServerTool() {
+				continue
 			}
+			if toolPeek.Tools[i].IsWebSearchTool() && hit.WebSearch {
+				continue
+			}
+			httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest,
+				"OpenAI-protocol custom providers do not support server-side tools; use an anthropic-protocol provider or disallow the tool (e.g. claude --disallowedTools WebSearch)")
+			return
 		}
 	}
 
@@ -66,6 +72,15 @@ func (p *Proxy) forwardOpenAI(ctx context.Context, w http.ResponseWriter, h http
 		args := appendSessionID(ctx, []any{"trace_id", short})
 		args = append(args, "provider", hit.Provider.Name, "count", docs)
 		slog.WarnContext(ctx, "custom provider document dropped", args...)
+	}
+	// The web_search exception to the toolPeek gate above, mirroring
+	// Forward's A1 trigger: the model declared web_search (hit) and the
+	// request carries the tool, so the provider's native search stands in
+	// via Bailian's enable_search; forced_search keeps it on unconditionally.
+	if info.HasWebSearch() && hit.WebSearch {
+		oaiReq.EnableSearch = true
+		oaiReq.SearchOptions = &oaiSearchOptions{ForcedSearch: true}
+		slog.InfoContext(ctx, "web search enabled", "trace_id", short, "provider", hit.Provider.Name, "mode", "enable_search")
 	}
 	body, err := json.Marshal(oaiReq)
 	if err != nil {

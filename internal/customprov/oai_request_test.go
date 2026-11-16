@@ -298,6 +298,39 @@ func TestBuildOpenAIRequest_Tools(t *testing.T) {
 	}
 }
 
+// TestBuildOpenAIRequest_WebSearchToolSkipped pins the behavior the web_search
+// stage relies on: Anthropic's server-side web_search tool definition
+// ({"type":"web_search_20250305","name":"web_search","max_uses":5}) carries
+// no input_schema, so the tool loop skips it like any other schema-less tool
+// and only plain function tools are forwarded.
+func TestBuildOpenAIRequest_WebSearchToolSkipped(t *testing.T) {
+	t.Run("mixed with a function tool", func(t *testing.T) {
+		req, _ := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[],"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":5},
+			{"name":"search","description":"Search things","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}
+		]}`)
+		want := []oaiTool{
+			{Type: "function", Function: &oaiToolSpec{
+				Name:        "search",
+				Description: "Search things",
+				Parameters:  jsontext.Value(`{"type":"object","properties":{"q":{"type":"string"}}}`),
+			}},
+		}
+		if !reflect.DeepEqual(req.Tools, want) {
+			t.Errorf("tools = %+v, want %+v", req.Tools, want)
+		}
+	})
+
+	t.Run("web_search only", func(t *testing.T) {
+		req, _ := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[],"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":5}
+		]}`)
+		if len(req.Tools) != 0 {
+			t.Errorf("tools = %+v, want none", req.Tools)
+		}
+	})
+}
+
 func TestBuildOpenAIRequest_ToolChoice(t *testing.T) {
 	cases := []struct {
 		name string

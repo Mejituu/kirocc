@@ -32,11 +32,21 @@ type oaiRequest struct {
 	StreamOptions  *oaiStreamOptions `json:"stream_options,omitempty"`
 	EnableThinking *bool             `json:"enable_thinking,omitempty"` // nil omits the field
 	ThinkingBudget int               `json:"thinking_budget,omitzero"`
+	// EnableSearch turns on the provider's native web search for a
+	// web_search model (Bailian's enable_search); SearchOptions pins
+	// forced_search so the search actually runs.
+	EnableSearch  bool              `json:"enable_search,omitzero"`
+	SearchOptions *oaiSearchOptions `json:"search_options,omitempty"`
 }
 
 // oaiStreamOptions asks the provider for usage in the SSE stream.
 type oaiStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
+}
+
+// oaiSearchOptions configures the provider's native web search.
+type oaiSearchOptions struct {
+	ForcedSearch bool `json:"forced_search"`
 }
 
 // oaiMessage is one Chat Completions message. Content holds the request form

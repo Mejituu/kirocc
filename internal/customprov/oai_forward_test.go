@@ -40,6 +40,26 @@ func newOpenAIProxy(t *testing.T, upstream *httptest.Server) *Proxy {
 	return NewProxy(reg, 5*time.Second)
 }
 
+// newOpenAIWebSearchProxy builds a proxy over a registry whose single
+// openai-protocol model opts into web_search, pointing at the test upstream.
+func newOpenAIWebSearchProxy(t *testing.T, upstream *httptest.Server) *Proxy {
+	t.Helper()
+	reg, err := loadTestRegistry(t, `{
+		"providers": {
+			"zhipu": {
+				"base_url": "`+upstream.URL+`",
+				"auth_token": "secret-token",
+				"protocol": "openai",
+				"models": [{"id": "ZHIPU/GLM-5.3", "web_search": true}]
+			}
+		}
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewProxy(reg, 5*time.Second)
+}
+
 // forwardOpenAISend sends raw through the proxy like forward in
 // proxy_test.go, with the stream flag of RequestInfo set from stream.
 func forwardOpenAISend(t *testing.T, p *Proxy, stream bool, clientHeaders http.Header, raw string) *httptest.ResponseRecorder {
@@ -483,6 +503,188 @@ func TestForwardOpenAI_ServerToolRejected(t *testing.T) {
 			t.Errorf("error.message = %q, want it to mention %q", payload.Error.Message, want)
 		}
 	}
+}
+
+// assertOpenAIServerToolRejected checks the 400 the openai path answers a
+// server-tool request with: the invalid_request_error type and the hint to
+// disallow the tool, unchanged from before web_search got its escape hatch.
+func assertOpenAIServerToolRejected(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("error body is not JSON: %s", w.Body.String())
+	}
+	if payload.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want invalid_request_error", payload.Error.Type)
+	}
+	for _, want := range []string{"server-side tools", "anthropic", "--disallowedTools"} {
+		if !strings.Contains(payload.Error.Message, want) {
+			t.Errorf("error.message = %q, want it to mention %q", payload.Error.Message, want)
+		}
+	}
+}
+
+// TestForwardOpenAI_WebSearchEnableSearch pins the openai path's web-search
+// stage on the wire: a web_search tool on a model that opted in no longer
+// rejects the request — the declaration becomes enable_search with a forced
+// search instead of a tools entry, the function tools still convert, and the
+// INF line records mode=enable_search. forwardPeeked decodes the RequestInfo
+// from the body like maybeForwardCustom, so the tool detection runs as in
+// production.
+func TestForwardOpenAI_WebSearchEnableSearch(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(oaiChatCompletion))
+	}))
+	defer upstream.Close()
+
+	buf := captureLogs(t, slog.LevelInfo)
+	raw := `{
+		"model": "claude-ZHIPU/GLM-5.3",
+		"max_tokens": 1024,
+		"messages": [{"role": "user", "content": "search the web"}],
+		"tools": [` + webSearchToolJSON + `, {
+			"name": "get_weather",
+			"description": "Get the weather of a city",
+			"input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}
+		}]
+	}`
+	w := forwardPeeked(t, newOpenAIWebSearchProxy(t, upstream), oaiTestModel, raw)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("client body is not JSON: %s", w.Body.String())
+	}
+	if resp.Type != "message" {
+		t.Errorf("client type = %q, want message; body: %s", resp.Type, w.Body.String())
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &req); err != nil {
+		t.Fatalf("upstream body is not JSON: %s", gotBody)
+	}
+	if req["enable_search"] != true {
+		t.Errorf("upstream enable_search = %v, want true; body: %s", req["enable_search"], gotBody)
+	}
+	so, ok := req["search_options"].(map[string]any)
+	if !ok || so["forced_search"] != true {
+		t.Errorf("upstream search_options = %v, want forced_search true; body: %s", req["search_options"], gotBody)
+	}
+	// web_search rides the switch above, not the tools array: only the
+	// function tool converts (the server-side definition has no schema).
+	tools, ok := req["tools"].([]any)
+	if !ok {
+		t.Fatalf("upstream tools is not an array; body: %s", gotBody)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("upstream tools = %d entries, want only the function tool; body: %s", len(tools), gotBody)
+	}
+	tool, _ := tools[0].(map[string]any)
+	fn, _ := tool["function"].(map[string]any)
+	if tool["type"] != "function" || fn["name"] != "get_weather" {
+		t.Errorf("upstream tool = %v, want the get_weather function tool; body: %s", tools[0], gotBody)
+	}
+
+	rec := findLogRecord(t, buf, "web search enabled")
+	attrs, _ := rec["attributes"].(map[string]any)
+	if attrs["provider"] != "zhipu" {
+		t.Errorf("log provider = %v, want zhipu", attrs["provider"])
+	}
+	if attrs["mode"] != "enable_search" {
+		t.Errorf("log mode = %v, want enable_search", attrs["mode"])
+	}
+}
+
+// TestForwardOpenAI_WebSearchNotRequested: a model that opted in but a request
+// without the web_search tool converts plainly — no enable_search, no
+// search_options, and no "web search enabled" line.
+func TestForwardOpenAI_WebSearchNotRequested(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(oaiChatCompletion))
+	}))
+	defer upstream.Close()
+
+	buf := captureLogs(t, slog.LevelInfo)
+	w := forwardPeeked(t, newOpenAIWebSearchProxy(t, upstream), oaiTestModel, oaiAnthropicRequest)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	var req map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &req); err != nil {
+		t.Fatalf("upstream body is not JSON: %s", gotBody)
+	}
+	if req["enable_search"] != nil {
+		t.Errorf("upstream enable_search = %v, want absent; body: %s", req["enable_search"], gotBody)
+	}
+	if req["search_options"] != nil {
+		t.Errorf("upstream search_options = %v, want absent; body: %s", req["search_options"], gotBody)
+	}
+	// The request line proves the capture works; the point is that no
+	// "web search enabled" record joins it.
+	findLogRecord(t, buf, "--> POST /v1/messages")
+	if strings.Contains(buf.String(), `"web search enabled"`) {
+		t.Errorf("unexpected web search enabled record:\n%s", buf.String())
+	}
+}
+
+// TestForwardOpenAI_WebSearchModelDisabled: the web_search tool on a model
+// that did not opt in (newOpenAIProxy's string shorthand) stays a plain
+// server-tool rejection — the openai path cannot stand in for the Anthropic
+// backend's search.
+func TestForwardOpenAI_WebSearchModelDisabled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be called for a server-tool request")
+	}))
+	defer upstream.Close()
+
+	raw := `{
+		"model": "claude-ZHIPU/GLM-5.3",
+		"max_tokens": 1024,
+		"messages": [{"role": "user", "content": "search the web"}],
+		"tools": [` + webSearchToolJSON + `]
+	}`
+	w := forwardPeeked(t, newOpenAIProxy(t, upstream), oaiTestModel, raw)
+	assertOpenAIServerToolRejected(t, w)
+}
+
+// TestForwardOpenAI_WebSearchWithOtherServerTool: a tool_search definition
+// next to the web_search tool still rejects the request — only web_search has
+// a native escape hatch, and it does not open one for its server-side kin.
+func TestForwardOpenAI_WebSearchWithOtherServerTool(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be called for a server-tool request")
+	}))
+	defer upstream.Close()
+
+	raw := `{
+		"model": "claude-ZHIPU/GLM-5.3",
+		"max_tokens": 1024,
+		"messages": [{"role": "user", "content": "search the web"}],
+		"tools": [` + webSearchToolJSON + `, {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}]
+	}`
+	w := forwardPeeked(t, newOpenAIWebSearchProxy(t, upstream), oaiTestModel, raw)
+	assertOpenAIServerToolRejected(t, w)
 }
 
 func TestForwardOpenAI_NoClientHeadersForwarded(t *testing.T) {
