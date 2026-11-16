@@ -137,7 +137,7 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		slog.InfoContext(ctx, "--> POST /v1/messages", requestLogArgs(ctx, short, hit, info)...)
 	}
 
-	body, err := RewriteModel(raw, hit.BaseModel)
+	body, err := RewriteForward(raw, hit.BaseModel)
 	if err != nil {
 		slog.ErrorContext(ctx, "custom provider request rewrite failed", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest, "invalid request: "+err.Error())

@@ -173,3 +173,28 @@ func TestForward_ModelNotString(t *testing.T) {
 		t.Errorf("error should explain the model problem: %s", payload.Error.Message)
 	}
 }
+
+// TestForward_StripsBillingHeaderFromSystem asserts the anthropic-path
+// rewrite on the wire: the upstream body carries no billing block, and
+// everything else — key order, the cache_control block, number spellings —
+// arrives exactly as the client sent it (modulo the model swap).
+func TestForward_StripsBillingHeaderFromSystem(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	raw := `{"model":"claude-glm-5.3","system":[{"type":"text","text":"x-anthropic-billing-header: cch=abc"},{"type":"text","text":"You are helpful.","cache_control":{"type":"ephemeral"}}],"temperature":0.5,"big":12345678901234567890,"messages":[]}`
+	w := forward(t, newTestProxy(t, upstream), upstream, "claude-glm-5.3", http.Header{}, raw)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	want := `{"model":"glm-5.3","system":[{"type":"text","text":"You are helpful.","cache_control":{"type":"ephemeral"}}],"temperature":0.5,"big":12345678901234567890,"messages":[]}` + "\n"
+	if gotBody != want {
+		t.Errorf("upstream body:\n got: %s\nwant: %s", gotBody, want)
+	}
+}
