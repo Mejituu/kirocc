@@ -469,6 +469,168 @@ func TestLoadFile_CountTokensDefault(t *testing.T) {
 	}
 }
 
+// TestLoadOpenAIProtocol covers the protocol field: the anthropic default,
+// the openai conversion, and the count_tokens interplay each protocol implies.
+func TestLoadOpenAIProtocol(t *testing.T) {
+	tests := []struct {
+		name      string
+		provider  string
+		wantErrs  []string
+		wantProto Protocol
+		wantCount bool
+	}{
+		{
+			name:      "omitted protocol defaults to anthropic",
+			provider:  providerEntry(""),
+			wantProto: ProtocolAnthropic,
+			wantCount: true,
+		},
+		{
+			name:      "explicit anthropic",
+			provider:  providerEntry(`,"protocol":"anthropic"`),
+			wantProto: ProtocolAnthropic,
+			wantCount: true,
+		},
+		{
+			name:      "openai defaults count_tokens to false",
+			provider:  providerEntry(`,"protocol":"openai"`),
+			wantProto: ProtocolOpenAI,
+			wantCount: false,
+		},
+		{
+			name:      "openai with explicit count_tokens false",
+			provider:  providerEntry(`,"protocol":"openai","count_tokens":false`),
+			wantProto: ProtocolOpenAI,
+			wantCount: false,
+		},
+		{
+			name:      "anthropic with explicit count_tokens true",
+			provider:  providerEntry(`,"protocol":"anthropic","count_tokens":true`),
+			wantProto: ProtocolAnthropic,
+			wantCount: true,
+		},
+		{
+			name:     "unknown protocol",
+			provider: providerEntry(`,"protocol":"grpc"`),
+			wantErrs: []string{
+				`providers.p.protocol`,
+				`only "anthropic" and "openai" are supported, got "grpc"`,
+			},
+		},
+		{
+			name:     "openai with count_tokens true",
+			provider: providerEntry(`,"protocol":"openai","count_tokens":true`),
+			wantErrs: []string{
+				`providers.p.count_tokens`,
+				"no count_tokens endpoint",
+				"kirocc estimates locally",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg, err := loadTestRegistry(t, `{"providers": {"p": `+tt.provider+`}}`)
+			if len(tt.wantErrs) > 0 {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+				for _, want := range tt.wantErrs {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %v, want it to contain %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := reg.providers[0]
+			if p.Protocol != tt.wantProto {
+				t.Errorf("Protocol = %q, want %q", p.Protocol, tt.wantProto)
+			}
+			if p.CountTokens != tt.wantCount {
+				t.Errorf("CountTokens = %v, want %v", p.CountTokens, tt.wantCount)
+			}
+		})
+	}
+}
+
+// TestLoadAlwaysThinking covers the always_thinking model flag: valid on
+// openai-protocol models (and carried through lookup), rejected on
+// anthropic providers, and a misspelling caught by the unknown-member
+// rejection.
+func TestLoadAlwaysThinking(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		wantErrs []string
+	}{
+		{
+			name:     "anthropic protocol rejects always_thinking",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"m","always_thinking":true}]}`,
+			wantErrs: []string{
+				`providers.p.models[0].always_thinking`,
+				"only OpenAI-protocol models support it",
+			},
+		},
+		{
+			name:     "anthropic protocol accepts an explicit false",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"m","always_thinking":false}]}`,
+		},
+		{
+			name:     "misspelled field is an unknown member",
+			provider: `{"base_url":"http://p","auth_token":"t","protocol":"openai","models":[{"id":"m","always_thinkin":true}]}`,
+			wantErrs: []string{"always_thinkin"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadTestRegistry(t, `{"providers": {"p": `+tt.provider+`}}`)
+			if len(tt.wantErrs) > 0 {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+				for _, want := range tt.wantErrs {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %v, want it to contain %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestLookupModelCarriesAlwaysThinking asserts the mapping target lookup
+// (the path session-following mappings take) hands the flag to the Hit.
+func TestLookupModelCarriesAlwaysThinking(t *testing.T) {
+	reg, err := loadTestRegistry(t, `{"providers": {"p": {
+		"base_url": "http://p", "auth_token": "t", "protocol": "openai",
+		"models": [{"id": "m", "always_thinking": true}, {"id": "n"}]
+	}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hit, ok := reg.lookupModel("p", "m")
+	if !ok {
+		t.Fatal("lookupModel missed")
+	}
+	if !hit.AlwaysThinking {
+		t.Error("hit.AlwaysThinking = false, want true for the configured model")
+	}
+	hit, ok = reg.lookupModel("p", "n")
+	if !ok {
+		t.Fatal("lookupModel missed")
+	}
+	if hit.AlwaysThinking {
+		t.Error("hit.AlwaysThinking = true, want false for a plain model")
+	}
+}
+
 func TestLoadFile_PermissionWarning(t *testing.T) {
 	buf := captureSlog(t)
 	path := filepath.Join(t.TempDir(), "mejituu.json5")

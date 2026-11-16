@@ -60,8 +60,8 @@ func textualizeUnknownBlock(b anthropic.ContentBlock) string {
 // Its per-request cch value changes the prompt prefix without adding instructions.
 const billingHeaderPrefix = "x-anthropic-billing-header:"
 
-// isBillingHeaderBlock reports whether text is Claude Code's attribution block and nothing else.
-func isBillingHeaderBlock(text string) bool {
+// IsBillingHeaderBlock reports whether text is Claude Code's attribution block and nothing else.
+func IsBillingHeaderBlock(text string) bool {
 	t := strings.TrimSpace(text)
 	return strings.HasPrefix(t, billingHeaderPrefix) && !strings.ContainsAny(t, "\r\n")
 }
@@ -78,7 +78,7 @@ func ExtractSystemPrompt(system anthropic.SystemPrompt) string {
 	}
 	var parts []string
 	for _, block := range system.Blocks {
-		if block.Type == anthropic.BlockTypeText && block.Text != "" && !isBillingHeaderBlock(block.Text) {
+		if block.Type == anthropic.BlockTypeText && block.Text != "" && !IsBillingHeaderBlock(block.Text) {
 			parts = append(parts, block.Text)
 		}
 	}

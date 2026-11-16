@@ -89,8 +89,8 @@ func TestIsBillingHeaderBlock(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isBillingHeaderBlock(tt.text); got != tt.want {
-				t.Fatalf("isBillingHeaderBlock(%q) = %v, want %v", tt.text, got, tt.want)
+			if got := IsBillingHeaderBlock(tt.text); got != tt.want {
+				t.Fatalf("IsBillingHeaderBlock(%q) = %v, want %v", tt.text, got, tt.want)
 			}
 		})
 	}

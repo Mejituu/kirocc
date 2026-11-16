@@ -8,11 +8,16 @@ import (
 
 // Anthropic-compatible error type constants.
 const (
-	ErrTypeInvalidRequest = "invalid_request_error"
-	ErrTypeAPI            = "api_error"
-	ErrTypeAuthentication = "authentication_error"
-	ErrTypeStream         = "stream_error"
-	ErrTypeBilling        = "billing_error"
+	ErrTypeInvalidRequest  = "invalid_request_error"
+	ErrTypeAPI             = "api_error"
+	ErrTypeAuthentication  = "authentication_error"
+	ErrTypeStream          = "stream_error"
+	ErrTypeBilling         = "billing_error"
+	ErrTypePermission      = "permission_error"
+	ErrTypeNotFound        = "not_found_error"
+	ErrTypeRequestTooLarge = "request_too_large"
+	ErrTypeRateLimit       = "rate_limit_error"
+	ErrTypeOverloaded      = "overloaded_error"
 )
 
 // WriteError writes an Anthropic-compatible JSON error response.

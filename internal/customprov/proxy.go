@@ -120,6 +120,10 @@ func (p *Proxy) ListModels() []ModelInfo {
 // line only after the body is fully read, and a "custom provider error"
 // warning when the provider answered with an error status.
 func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Header, raw []byte, hit Hit, info RequestInfo, endpoint Endpoint) {
+	if hit.Provider.Protocol == ProtocolOpenAI {
+		p.forwardOpenAI(ctx, w, h, raw, hit, info, endpoint)
+		return
+	}
 	traceID, short := logging.TraceIDs(ctx)
 	// The timer starts when kirocc received the request — maybeForwardCustom
 	// put it in ctx (creating it for count_tokens, whose callers do not start
@@ -255,35 +259,43 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		} else if jsonBody != nil {
 			usage = jsonUsage(jsonBody)
 		}
-		args := appendSessionID(ctx, []any{"trace_id", short})
-		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode)
-		var pct float64
-		var contextUsage string
-		var outTokens int
-		if usage != nil {
-			pct = float64(usage.inputTokens) * 100 / float64(contextWindow(hit))
-			contextUsage = fmt.Sprintf("%.1fk(%.1f%%)", float64(usage.inputTokens)/1000, pct)
-			outTokens = usage.outputTokens
-			args = append(args, "input_tokens", usage.inputTokens, "output_tokens", usage.outputTokens, "context_usage", contextUsage)
-		}
-		// An error response carries no meaningful speed signal, so it logs
-		// only the duration.
-		now := time.Now()
-		if resp.StatusCode < 400 {
-			args = append(args, timer.LogArgs(outTokens, now, scanner != nil)...)
-		} else {
-			args = append(args, timer.DurationArgs(now)...)
-		}
-		slog.InfoContext(ctx, "<-- POST /v1/messages", args...)
-		// Mirror the Kiro path's warning when the context window is full.
-		if pct >= 100 {
-			slog.WarnContext(ctx, "context limit exceeded", "trace_id", short, "context_usage", contextUsage)
-		}
+		writeCompletionLog(ctx, short, hit, resp.StatusCode, usage, timer, scanner != nil)
 	}
 	if errBody != nil {
 		args := appendSessionID(ctx, []any{"trace_id", short})
 		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode, "body", string(errBody))
 		slog.WarnContext(ctx, "custom provider error", args...)
+	}
+}
+
+// writeCompletionLog emits the "<-- POST /v1/messages" line both protocol
+// paths share: the usage fields when the response carried them, the timing
+// fields (streaming selects the speed arguments) and the context-limit
+// warning.
+func writeCompletionLog(ctx context.Context, short string, hit Hit, status int, usage *observedUsage, timer *timing.Request, streaming bool) {
+	args := appendSessionID(ctx, []any{"trace_id", short})
+	args = append(args, "provider", hit.Provider.Name, "status", status)
+	var pct float64
+	var contextUsage string
+	var outTokens int
+	if usage != nil {
+		pct = float64(usage.inputTokens) * 100 / float64(contextWindow(hit))
+		contextUsage = fmt.Sprintf("%.1fk(%.1f%%)", float64(usage.inputTokens)/1000, pct)
+		outTokens = usage.outputTokens
+		args = append(args, "input_tokens", usage.inputTokens, "output_tokens", usage.outputTokens, "context_usage", contextUsage)
+	}
+	// An error response carries no meaningful speed signal, so it logs
+	// only the duration.
+	now := time.Now()
+	if status < 400 {
+		args = append(args, timer.LogArgs(outTokens, now, streaming)...)
+	} else {
+		args = append(args, timer.DurationArgs(now)...)
+	}
+	slog.InfoContext(ctx, "<-- POST /v1/messages", args...)
+	// Mirror the Kiro path's warning when the context window is full.
+	if pct >= 100 {
+		slog.WarnContext(ctx, "context limit exceeded", "trace_id", short, "context_usage", contextUsage)
 	}
 }
 

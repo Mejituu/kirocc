@@ -84,6 +84,7 @@ type providerConfig struct {
 	AuthToken   string       `json:"auth_token"`
 	CountTokens *bool        `json:"count_tokens,omitempty"` // nil means true
 	Models      []modelEntry `json:"models"`
+	Protocol    string       `json:"protocol,omitempty"` // empty means anthropic
 
 	// Mappings are the session-following rules for this provider's
 	// sessions; a separate group keeps the field alignment stable.
@@ -115,6 +116,10 @@ type modelSpec struct {
 	Alias     string `json:"alias,omitempty"`
 	Context1M bool   `json:"context_1m,omitempty"`
 	Label     string `json:"label,omitempty"`
+
+	// AlwaysThinking is only meaningful for openai-protocol providers; the
+	// buildRegistry loop rejects it on anthropic providers.
+	AlwaysThinking bool `json:"always_thinking,omitempty"`
 }
 
 // mappingRule is one entry of a mappings group.
@@ -250,17 +255,37 @@ func buildRegistry(path string, fc fileConfig) (*Registry, error) {
 			return nil, fmt.Errorf("%s: providers.%s.models must not be empty", path, name)
 		}
 
+		protocol := Protocol(pc.Protocol)
+		switch protocol {
+		case "":
+			protocol = ProtocolAnthropic
+		case ProtocolAnthropic, ProtocolOpenAI:
+		default:
+			return nil, fmt.Errorf("%s: providers.%s.protocol: only %q and %q are supported, got %q", path, name, ProtocolAnthropic, ProtocolOpenAI, pc.Protocol)
+		}
+		countTokens := pc.CountTokens == nil || *pc.CountTokens
+		if protocol == ProtocolOpenAI {
+			if pc.CountTokens != nil && *pc.CountTokens {
+				return nil, fmt.Errorf("%s: providers.%s.count_tokens: OpenAI protocol providers have no count_tokens endpoint; kirocc estimates locally, so count_tokens cannot be true", path, name)
+			}
+			countTokens = false
+		}
+
 		p := &Provider{
 			Name:        name,
 			BaseURL:     baseURL,
 			authToken:   pc.AuthToken,
-			CountTokens: pc.CountTokens == nil || *pc.CountTokens,
+			CountTokens: countTokens,
+			Protocol:    protocol,
 		}
 		seenIDs := make(map[string]bool, len(pc.Models))
 		for i, entry := range pc.Models {
 			m, err := buildModel(path, name, i, entry)
 			if err != nil {
 				return nil, err
+			}
+			if m.AlwaysThinking && protocol != ProtocolOpenAI {
+				return nil, fmt.Errorf("%s: providers.%s.models[%d].always_thinking: only OpenAI-protocol models support it (some reject enable_thinking:false)", path, name, i)
 			}
 			if seenIDs[m.ID] {
 				return nil, fmt.Errorf("%s: providers.%s.models[%d].id: %q is declared twice in this provider", path, name, i, m.ID)
@@ -339,7 +364,7 @@ func buildModel(path, providerName string, i int, entry modelEntry) (Model, erro
 		if display == "" {
 			display = s.ID
 		}
-		return Model{ID: s.ID, Display: display, Context1M: s.Context1M, Label: s.Label}, nil
+		return Model{ID: s.ID, Display: display, Context1M: s.Context1M, Label: s.Label, AlwaysThinking: s.AlwaysThinking}, nil
 	}
 	if entry.String == "" {
 		return Model{}, fmt.Errorf("%s: providers.%s.models[%d].id must not be empty", path, providerName, i)

@@ -19,6 +19,11 @@ type Model struct {
 	// Label is the model picker's display name; empty derives it from
 	// Display.
 	Label string
+
+	// AlwaysThinking marks an openai-protocol model that rejects
+	// enable_thinking:false; its requests omit the field entirely so the
+	// model keeps thinking.
+	AlwaysThinking bool
 }
 
 // trimOneMSuffix strips a trailing [1m] context marker, case-insensitively —
@@ -38,6 +43,10 @@ type Provider struct {
 	Models      []Model
 	CountTokens bool
 
+	// Protocol is the wire protocol the provider speaks; a separate group
+	// keeps the field alignment above stable.
+	Protocol Protocol
+
 	// authToken is unexported so it cannot leak into logs or JSON dumps.
 	authToken string
 }
@@ -49,6 +58,10 @@ type Hit struct {
 	// Config1M reports whether the model advertises a 1M context window,
 	// regardless of how the request spelled the ID.
 	Config1M bool
+
+	// AlwaysThinking reports an openai-protocol model that rejects
+	// enable_thinking:false, so its requests omit the field.
+	AlwaysThinking bool
 }
 
 // modelMatch is the registry entry a display name resolves to: the provider
@@ -86,7 +99,7 @@ func (r *Registry) Lookup(model string) (Hit, bool) {
 	if !ok {
 		return Hit{}, false
 	}
-	return Hit{Provider: m.provider, BaseModel: m.model.ID, Config1M: m.model.Context1M}, true
+	return Hit{Provider: m.provider, BaseModel: m.model.ID, Config1M: m.model.Context1M, AlwaysThinking: m.model.AlwaysThinking}, true
 }
 
 // lookupModel resolves a mapping target: the model with exactly this id in
@@ -102,7 +115,7 @@ func (r *Registry) lookupModel(providerName, id string) (Hit, bool) {
 	}
 	for _, m := range p.Models {
 		if m.ID == id {
-			return Hit{Provider: p, BaseModel: m.ID, Config1M: m.Context1M}, true
+			return Hit{Provider: p, BaseModel: m.ID, Config1M: m.Context1M, AlwaysThinking: m.AlwaysThinking}, true
 		}
 	}
 	return Hit{}, false

@@ -311,7 +311,7 @@ Requests for models from an Anthropic-compatible provider (e.g. Alibaba Bailian'
 }
 ```
 
-Providers is a map keyed by provider name (used in logs and as the `owned_by` of its models in `/v1/models`); `kiro` is reserved. Each provider takes `base_url` (the Anthropic-compatible endpoint, http/https), `auth_token` (sent as `Authorization: Bearer <token>`; never appears in kirocc's logs), `count_tokens` (optional, defaults to `true`: forward `/v1/messages/count_tokens` to the provider instead of estimating locally), `models`, and `mappings`. Declaration order is preserved: `/v1/models` and the load log list providers and models as written.
+Providers is a map keyed by provider name (used in logs and as the `owned_by` of its models in `/v1/models`); `kiro` is reserved. Each provider takes `base_url` (the Anthropic-compatible endpoint, http/https), `auth_token` (sent as `Authorization: Bearer <token>`; never appears in kirocc's logs), `count_tokens` (optional, defaults to `true`: forward `/v1/messages/count_tokens` to the provider instead of estimating locally; with `protocol: 'openai'` it defaults to `false` and must not be `true` — OpenAI-protocol providers have no count_tokens endpoint, so kirocc always estimates locally), `protocol` (optional, defaults to `'anthropic'`: forward the Messages API request verbatim; `'openai'` converts it to the OpenAI Chat Completions protocol and converts the response back), `models`, and `mappings`. Declaration order is preserved: `/v1/models` and the load log list providers and models as written.
 
 Each `models` entry is either the string shorthand (`'kimi-k3[1m]'` means `{id: 'kimi-k3', context_1m: true}`) or an object:
 
@@ -321,6 +321,7 @@ Each `models` entry is either the string shorthand (`'kimi-k3[1m]'` means `{id: 
 | `alias`      | Optional, defaults to `id`. The name requests match on and the gateway lists                          |
 | `context_1m` | Optional, defaults to `false`. Advertises a 1M context window, adding `[1m]` to the exposed ID        |
 | `label`      | Optional. The `/model` picker's display name; defaults to the alias (with `[1m]` when 1M)            |
+| `always_thinking` | Optional, defaults to `false`, openai protocol only. Some models always think and reject `enable_thinking: false` (GLM-5.3, Kimi K3); for them kirocc omits the field instead of sending false. Rejected at startup on anthropic-protocol providers |
 
 Exposed IDs are `claude-<alias>` (`claude-glm-5.3[1m]` when 1M). A request whose model is `claude-glm-5.3` or `claude-glm-5.3[1m]` is routed to that provider with the model name rewritten to the model's `id`; every other model keeps going through Kiro. Aliases must be unique across providers and must not collide with built-in kirocc IDs.
 
