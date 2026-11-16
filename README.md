@@ -356,7 +356,13 @@ Claude Code's background classifier sends small requests (`model=claude-sonnet-5
 }
 ```
 
-Within a group, rules match in order and the first hit wins. A rule's `model` is compared with the `[1m]` marker ignored on both sides, case-sensitively otherwise; `thinking` and `stream` are optional filters — omitting one matches either value, and `thinking` only looks at `thinking.type` (the `[1m]` marker never counts as thinking). `to.model` is used verbatim: a `kiro` target is checked per request against kirocc's model table, while a custom target must be exactly one of that provider's model **ids** (aliases are rejected) and is checked at startup.
+Within a group, rules match in order and the first hit wins. A rule's `model` is compared with the `[1m]` marker ignored on both sides, case-sensitively otherwise; `thinking`, `stream`, and `web_search` are optional filters — omitting one matches either value, and `thinking` only looks at `thinking.type` (the `[1m]` marker never counts as thinking). `web_search: true` matches only requests that carry the `web_search` tool, `false` only requests without it. A `web_search: true` rule is also the only one that may omit `model` (every other rule requires it); with `model` omitted the rule matches every model, so one rule can route all search-enabled requests to a model with native search:
+
+```json5
+{web_search: true, to: {model: 'qwen3.8-max'}}
+```
+
+where `qwen3.8-max` is a model of the target provider declared with `web_search: true`. `to.model` is used verbatim: a `kiro` target is checked per request against kirocc's model table, while a custom target must be exactly one of that provider's model **ids** (aliases are rejected) and is checked at startup. A `web_search` rule with a custom target must point at a model declared with `web_search: true` — a model without the flag will not search — under the same startup check; `kiro` targets are not validated.
 
 A session's provider is set by its most recent unmapped `POST /v1/messages` request carrying the `X-Claude-Code-Session-Id` header — custom-model requests record their provider, everything else records `kiro`. Mapped requests never change the session's provider, and a session with no record yet is never mapped. `POST /v1/messages/count_tokens` neither reads nor writes the session table and is never mapped. When a mapping's target turns out unknown, kirocc warns (`model mapping target unknown`) and routes the request normally without touching the session.
 

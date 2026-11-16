@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/d-kuro/kirocc/internal/anthropic"
 )
 
 // mappingProviderConfig is one provider carrying a mappings group.
@@ -41,6 +43,11 @@ func TestBuildMappings_ValidationErrors(t *testing.T) {
 		{
 			name:    "duplicate rules in a group",
 			mapping: `[{"model":"m","thinking":false,"stream":false,"to":{"provider":"kiro","model":"x"}},{"model":"m","thinking":false,"stream":false,"to":{"provider":"kiro","model":"y"}}]`,
+			wantErr: "can never match",
+		},
+		{
+			name:    "duplicate rules by model and web_search",
+			mapping: `[{"model":"m","web_search":true,"to":{"provider":"kiro","model":"x"}},{"model":"m","web_search":true,"to":{"provider":"kiro","model":"y"}}]`,
 			wantErr: "can never match",
 		},
 	}
@@ -221,6 +228,114 @@ func TestMatchMapping_ThinkingFilter(t *testing.T) {
 		_, m, ok := p.MatchMapping("s", info)
 		if !ok || m.ModelTo != "a" {
 			t.Errorf("%s: match = %+v, ok = %v; want thinking=false rule", name, m, ok)
+		}
+	}
+}
+
+// webSearchTools is the request's web_search server-side tool declaration,
+// as Claude Code's WebSearch sends it.
+func webSearchTools() []anthropic.Tool {
+	return []anthropic.Tool{{Type: "web_search_20250305", Name: "web_search"}}
+}
+
+// TestMatchMapping_WebSearchFilter asserts the web_search condition: true
+// matches only requests carrying the tool, false only those without it, and
+// an omitted filter matches either.
+func TestMatchMapping_WebSearchFilter(t *testing.T) {
+	mappings := `[
+		{"model":"claude-sonnet-5","web_search":true,"to":{"model":"search-native"}},
+		{"model":"claude-sonnet-5","web_search":false,"to":{"model":"search-off"}},
+		{"model":"claude-haiku-4.5","to":{"model":"either"}}
+	]`
+	reg, err := loadTestRegistry(t, strings.Replace(mappingKiroConfig, "%s", mappings, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxy(reg, time.Second)
+	p.RecordSession("s", KiroProviderName)
+
+	if _, m, ok := p.MatchMapping("s", RequestInfo{Model: "claude-sonnet-5", Tools: webSearchTools()}); !ok || m.ModelTo != "search-native" {
+		t.Errorf("search request: match = %+v, ok = %v; want the web_search=true rule", m, ok)
+	}
+	if _, m, ok := p.MatchMapping("s", RequestInfo{Model: "claude-sonnet-5"}); !ok || m.ModelTo != "search-off" {
+		t.Errorf("plain request: match = %+v, ok = %v; want the web_search=false rule", m, ok)
+	}
+	// A rule without the filter matches either kind.
+	for name, info := range map[string]RequestInfo{
+		"search": {Model: "claude-haiku-4.5", Tools: webSearchTools()},
+		"plain":  {Model: "claude-haiku-4.5"},
+	} {
+		if _, m, ok := p.MatchMapping("s", info); !ok || m.ModelTo != "either" {
+			t.Errorf("%s: match = %+v, ok = %v; want the rule without a web_search filter", name, m, ok)
+		}
+	}
+}
+
+// TestMatchMapping_WebSearchAnyModel asserts a rule may leave model empty —
+// the web_search condition alone narrows it, so requests of any model hit,
+// and only those carrying the tool.
+func TestMatchMapping_WebSearchAnyModel(t *testing.T) {
+	mappings := `[{"web_search":true,"to":{"model":"glm-5.3"}}]`
+	reg, err := loadTestRegistry(t, strings.Replace(mappingKiroConfig, "%s", mappings, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxy(reg, time.Second)
+	p.RecordSession("s", KiroProviderName)
+
+	for _, model := range []string{"claude-x", "glm-5.3", "claude-x[1m]"} {
+		_, m, ok := p.MatchMapping("s", RequestInfo{Model: model, Tools: webSearchTools()})
+		if !ok || m.Provider != KiroProviderName || m.ModelTo != "glm-5.3" {
+			t.Errorf("model %q with search: match = %+v, ok = %v; want kiro/glm-5.3", model, m, ok)
+		}
+		if _, _, ok := p.MatchMapping("s", RequestInfo{Model: model}); ok {
+			t.Errorf("model %q without search should not match", model)
+		}
+	}
+}
+
+// TestMatchMapping_WebSearchWithThinkingAndStream crosses the web_search
+// filter with thinking and stream: each combination is queried once, and the
+// combinations no rule covers must not map.
+func TestMatchMapping_WebSearchWithThinkingAndStream(t *testing.T) {
+	mappings := `[
+		{"model":"claude-sonnet-5","web_search":true,"thinking":true,"to":{"model":"a"}},
+		{"model":"claude-sonnet-5","web_search":true,"stream":false,"to":{"model":"b"}},
+		{"model":"claude-sonnet-5","web_search":false,"stream":true,"to":{"model":"c"}}
+	]`
+	reg, err := loadTestRegistry(t, strings.Replace(mappingKiroConfig, "%s", mappings, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxy(reg, time.Second)
+	p.RecordSession("s", KiroProviderName)
+
+	tools := webSearchTools()
+	enabled := &thinkingPeek{Type: "enabled"}
+	tests := []struct {
+		name      string
+		info      RequestInfo
+		wantModel string // "" = no rule matches
+	}{
+		{"search, thinking, streaming", RequestInfo{Model: "claude-sonnet-5", Tools: tools, Thinking: enabled, Stream: true}, "a"},
+		{"search, thinking, non-streaming", RequestInfo{Model: "claude-sonnet-5", Tools: tools, Thinking: enabled, Stream: false}, "a"},
+		{"search, no thinking, streaming", RequestInfo{Model: "claude-sonnet-5", Tools: tools, Stream: true}, ""},
+		{"search, disabled thinking, non-streaming", RequestInfo{Model: "claude-sonnet-5", Tools: tools, Thinking: &thinkingPeek{Type: "disabled"}, Stream: false}, "b"},
+		{"no search, thinking, streaming", RequestInfo{Model: "claude-sonnet-5", Thinking: enabled, Stream: true}, "c"},
+		{"no search, thinking, non-streaming", RequestInfo{Model: "claude-sonnet-5", Thinking: enabled, Stream: false}, ""},
+		{"no search, no thinking, streaming", RequestInfo{Model: "claude-sonnet-5", Stream: true}, "c"},
+		{"no search, no thinking, non-streaming", RequestInfo{Model: "claude-sonnet-5"}, ""},
+	}
+	for _, tt := range tests {
+		_, m, ok := p.MatchMapping("s", tt.info)
+		if tt.wantModel == "" {
+			if ok {
+				t.Errorf("%s: match = %+v; want no rule to match", tt.name, m)
+			}
+			continue
+		}
+		if !ok || m.ModelTo != tt.wantModel {
+			t.Errorf("%s: match = %+v, ok = %v; want model %q", tt.name, m, ok, tt.wantModel)
 		}
 	}
 }

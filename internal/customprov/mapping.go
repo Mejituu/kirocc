@@ -5,15 +5,19 @@ import (
 )
 
 // Mapping is one compiled session-following rule: a request from a session
-// whose provider matches the group, and whose model, thinking and stream
-// match the condition, is rerouted to Provider's ModelTo.
+// whose provider matches the group, and whose model, thinking, stream and
+// web_search match the condition, is rerouted to Provider's ModelTo.
 type Mapping struct {
 	// Model is the matched request model with the [1m] marker stripped; the
-	// comparison itself ignores the marker either way.
+	// comparison itself ignores the marker either way. Empty matches any
+	// model, for rules narrowed by web_search alone.
 	Model string
 	// Thinking and Stream narrow the condition; nil matches either value.
 	Thinking *bool
 	Stream   *bool
+	// WebSearch narrows the condition to requests that carry (or do not
+	// carry) the web_search tool; nil matches either.
+	WebSearch *bool
 	// Provider is the target: "kiro" or a declared provider name.
 	Provider string
 	// ModelTo is the target model ID, verbatim — it may carry "/" or upper
@@ -23,13 +27,16 @@ type Mapping struct {
 
 // matches reports whether a peeked request satisfies the rule's condition.
 func (m Mapping) matches(info RequestInfo) bool {
-	if trimOneMSuffix(info.Model) != m.Model {
+	if m.Model != "" && trimOneMSuffix(info.Model) != m.Model {
 		return false
 	}
 	if m.Thinking != nil && *m.Thinking != thinkingRequested(info) {
 		return false
 	}
 	if m.Stream != nil && *m.Stream != info.Stream {
+		return false
+	}
+	if m.WebSearch != nil && *m.WebSearch != info.HasWebSearch() {
 		return false
 	}
 	return true
@@ -40,7 +47,8 @@ func (m Mapping) matches(info RequestInfo) bool {
 func (m Mapping) sameCondition(other Mapping) bool {
 	return m.Model == other.Model &&
 		boolPtrEqual(m.Thinking, other.Thinking) &&
-		boolPtrEqual(m.Stream, other.Stream)
+		boolPtrEqual(m.Stream, other.Stream) &&
+		boolPtrEqual(m.WebSearch, other.WebSearch)
 }
 
 func boolPtrEqual(a, b *bool) bool {

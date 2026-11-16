@@ -711,6 +711,106 @@ func TestLookupCarriesWebSearch(t *testing.T) {
 	}
 }
 
+// TestLoadMappingWebSearch covers the web_search mapping condition: a
+// web_search rule may leave model empty (it matches any model), a custom
+// target must itself enable web_search, and web_search:false gains no
+// privileges.
+func TestLoadMappingWebSearch(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    string
+		wantErrs  []string
+		wantCount int
+	}{
+		{
+			name:      "web_search rule without a model matches any model",
+			config:    `{"kiro":{"mappings":[{"web_search":true,"to":{"provider":"kiro","model":"x"}}]}}`,
+			wantCount: 1,
+		},
+		{
+			name:      "web_search rule with a model",
+			config:    `{"kiro":{"mappings":[{"model":"m","web_search":true,"to":{"provider":"kiro","model":"x"}}]}}`,
+			wantCount: 1,
+		},
+		{
+			name:     "omitted model without web_search still errors",
+			config:   `{"providers":{"p":` + providerEntry(`,"mappings":[{"to":{"model":"m"}}]`) + `}}`,
+			wantErrs: []string{"providers.p.mappings[0].model must not be empty"},
+		},
+		{
+			name:     "web_search false does not unlock an omitted model",
+			config:   `{"providers":{"p":` + providerEntry(`,"mappings":[{"web_search":false,"to":{"model":"m"}}]`) + `}}`,
+			wantErrs: []string{"providers.p.mappings[0].model must not be empty"},
+		},
+		{
+			name:   "web_search rule targeting a model without web_search",
+			config: `{"providers":{"p":` + providerEntry(`,"mappings":[{"model":"m","web_search":true,"to":{"model":"m"}}]`) + `}}`,
+			wantErrs: []string{
+				`providers.p.mappings[0].to.model: "m" does not enable web_search`,
+				"a web_search rule must target a model with web_search true",
+			},
+		},
+		{
+			name:      "web_search rule targeting a model with web_search",
+			config:    `{"providers":{"p":{"base_url":"http://p","auth_token":"t","models":[{"id":"qwen3.8-max","web_search":true}],"mappings":[{"model":"m","web_search":true,"to":{"model":"qwen3.8-max"}}]}}}`,
+			wantCount: 1,
+		},
+		{
+			name:      "web_search rule targeting kiro skips the target check",
+			config:    `{"providers":{"p":` + providerEntry(`,"mappings":[{"web_search":true,"to":{"provider":"kiro","model":"x"}}]`) + `}}`,
+			wantCount: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg, err := loadTestRegistry(t, tt.config)
+			if len(tt.wantErrs) > 0 {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+				for _, want := range tt.wantErrs {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %v, want it to contain %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := reg.mappingCount(); got != tt.wantCount {
+				t.Errorf("mappingCount = %d, want %d", got, tt.wantCount)
+			}
+		})
+	}
+}
+
+// TestLoadMappingWebSearchCondition asserts the compiled rule carries the
+// web_search condition through to the Mapping, true or false, and keeps an
+// omitted model empty.
+func TestLoadMappingWebSearchCondition(t *testing.T) {
+	reg, err := loadTestRegistry(t, `{"kiro":{"mappings":[
+		{"web_search": true, "to": {"provider": "kiro", "model": "x"}},
+		{"model": "m", "web_search": false, "to": {"provider": "kiro", "model": "y"}}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := reg.mappings["kiro"]
+	if len(ms) != 2 {
+		t.Fatalf("mappings = %v, want 2 rules", ms)
+	}
+	if ms[0].Model != "" {
+		t.Errorf("mappings[0].Model = %q, want empty for an any-model rule", ms[0].Model)
+	}
+	if ms[0].WebSearch == nil || !*ms[0].WebSearch {
+		t.Error("mappings[0].WebSearch should carry a true condition")
+	}
+	if ms[1].WebSearch == nil || *ms[1].WebSearch {
+		t.Error("mappings[1].WebSearch should carry a false condition")
+	}
+}
+
 func TestLoadFile_PermissionWarning(t *testing.T) {
 	buf := captureSlog(t)
 	path := filepath.Join(t.TempDir(), "mejituu.json5")

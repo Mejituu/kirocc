@@ -157,6 +157,67 @@ func TestCustomMapping_MappedRequestKeepsSession(t *testing.T) {
 	}
 }
 
+// TestCustomMapping_WebSearchRule asserts the web_search mapping condition:
+// within a session recorded on bailian, only requests that declare the
+// web_search server-side tool hit the rule and are rerouted to the
+// web-search-capable model; the same model without the tool matches no rule
+// and stays on normal routing.
+func TestCustomMapping_WebSearchRule(t *testing.T) {
+	upstream, upstreamRequests := mappingUpstream(t)
+	buf := captureTint(t, slog.LevelInfo)
+	client := &capturingKiroClient{}
+
+	// The models array mixes the string shorthand with the object form:
+	// qwen3.8-max is the rule's target and opts into native web search. The
+	// rule has no model condition, so it matches any model carrying the tool.
+	t.Setenv("KIROCC_MODEL_MAPPINGS", "")
+	path := filepath.Join(t.TempDir(), "mejituu.json5")
+	content := fmt.Sprintf(`{"providers":{"bailian":{"base_url":%q,"auth_token":"secret-token","models":["glm-5.3[1m]",{"id":"qwen3.8-max","web_search":true}],"mappings":[{"web_search":true,"to":{"model":"qwen3.8-max"}}]}},"kiro":{"mappings":[]}}`, upstream.URL)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := customprov.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authMgr := &countingAuth{creds: &auth.Credentials{AccessToken: "kiro-token", ProfileARN: "arn:test", Region: "us-east-1"}}
+	s := New(authMgr, client, WithCustomProviders(customprov.NewProxy(reg, 5*time.Second)))
+
+	// 1. A normal glm request records the session as bailian.
+	postWithSession(t, s, "sess-1", `{"model":"claude-glm-5.3","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+
+	// 2. A web_search request on an unrelated model hits the rule and
+	// forwards to qwen3.8-max.
+	postWithSession(t, s, "sess-1", `{"model":"claude-sonnet-4-6","max_tokens":16,`+
+		`"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":5}],`+
+		`"messages":[{"role":"user","content":"search this"}]}`)
+
+	// 3. The same model without the tool matches no rule and stays on the
+	// Kiro path with the model itself.
+	postWithSession(t, s, "sess-1", `{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+
+	requests := upstreamRequests()
+	if len(requests) != 2 {
+		t.Fatalf("upstream requests = %v, want 2 (the toolless request must stay off the provider)", requests)
+	}
+	if requests[0][1] != "glm-5.3" || requests[1][1] != "qwen3.8-max" {
+		t.Errorf("upstream models = %v, want glm-5.3 then qwen3.8-max", requests)
+	}
+
+	mappedLine := findLine(t, buf, "model mapped")
+	assertAttrOrder(t, mappedLine, "trace_id", "session_id", "session_provider", "from", "to_provider", "to_model")
+	if !strings.Contains(mappedLine, "session_provider=bailian") || !strings.Contains(mappedLine, "from=claude-sonnet-4-6") || !strings.Contains(mappedLine, "to_model=qwen3.8-max") {
+		t.Errorf("model mapped line: %s", mappedLine)
+	}
+
+	// Normal routing resolves the request's own model on the Kiro path
+	// (claude-sonnet-4.6 is the catalog's Kiro spelling), proving the rule
+	// did not fire without the tool.
+	if got := client.model(); got != "claude-sonnet-4.6" {
+		t.Errorf("Kiro path received model %q, want claude-sonnet-4.6", got)
+	}
+}
+
 // capturingKiroClient records the last payload's model for the Kiro-path
 // assertion and answers an error to stop the flow.
 type capturingKiroClient struct {

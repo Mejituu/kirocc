@@ -128,10 +128,11 @@ type modelSpec struct {
 
 // mappingRule is one entry of a mappings group.
 type mappingRule struct {
-	Model    string        `json:"model"`
-	Thinking *bool         `json:"thinking,omitempty"` // nil = either
-	Stream   *bool         `json:"stream,omitempty"`   // nil = either
-	To       mappingTarget `json:"to"`
+	Model     string        `json:"model"`
+	Thinking  *bool         `json:"thinking,omitempty"`   // nil = either
+	Stream    *bool         `json:"stream,omitempty"`     // nil = either
+	WebSearch *bool         `json:"web_search,omitempty"` // nil = either
+	To        mappingTarget `json:"to"`
 }
 
 // mappingTarget is the rule's destination. An empty Provider takes the
@@ -387,7 +388,10 @@ func compileMappings(path, groupLoc string, rules []mappingRule, defaultProvider
 	}
 	compiled := make([]Mapping, 0, len(rules))
 	for i, rule := range rules {
-		if rule.Model == "" {
+		// A web_search rule matches any model, so it may leave model empty;
+		// every other rule still names one.
+		webSearch := rule.WebSearch != nil && *rule.WebSearch
+		if rule.Model == "" && !webSearch {
 			return nil, fmt.Errorf("%s: %s.mappings[%d].model must not be empty", path, groupLoc, i)
 		}
 		if rule.To.Model == "" {
@@ -408,22 +412,43 @@ func compileMappings(path, groupLoc string, rules []mappingRule, defaultProvider
 			if !p.hasModelID(rule.To.Model) {
 				return nil, fmt.Errorf("%s: %s.mappings[%d].to.model: %q is not a model id of provider %q; write the model's id, not its alias", path, groupLoc, i, rule.To.Model, target)
 			}
+			// A web_search rule reroutes requests to the target's native web
+			// search, so the target model must itself enable it. hasModelID
+			// has already vouched for the id, so the nil arm is a guard only.
+			if webSearch {
+				if tm := p.modelByID(rule.To.Model); tm == nil || !tm.WebSearch {
+					return nil, fmt.Errorf("%s: %s.mappings[%d].to.model: %q does not enable web_search; a web_search rule must target a model with web_search true", path, groupLoc, i, rule.To.Model)
+				}
+			}
 		}
 		m := Mapping{
-			Model:    trimOneMSuffix(rule.Model),
-			Thinking: rule.Thinking,
-			Stream:   rule.Stream,
-			Provider: target,
-			ModelTo:  rule.To.Model,
+			Model:     trimOneMSuffix(rule.Model),
+			Thinking:  rule.Thinking,
+			Stream:    rule.Stream,
+			WebSearch: rule.WebSearch,
+			Provider:  target,
+			ModelTo:   rule.To.Model,
 		}
 		for _, prev := range compiled {
 			if prev.sameCondition(m) {
-				return nil, fmt.Errorf("%s: %s.mappings[%d] duplicates an earlier rule with the same model, thinking and stream, so it can never match", path, groupLoc, i)
+				return nil, fmt.Errorf("%s: %s.mappings[%d] duplicates an earlier rule with the same model, thinking, stream and web_search, so it can never match", path, groupLoc, i)
 			}
 		}
 		compiled = append(compiled, m)
 	}
 	return compiled, nil
+}
+
+// modelByID returns the model declaration with exactly this id — the
+// web_search mapping-target check reads the declaration's flag. Aliases do
+// not match, same as hasModelID.
+func (p *Provider) modelByID(id string) *Model {
+	for i := range p.Models {
+		if p.Models[i].ID == id {
+			return &p.Models[i]
+		}
+	}
+	return nil
 }
 
 // normalizeBaseURL validates an http/https endpoint and strips trailing
