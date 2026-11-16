@@ -35,10 +35,8 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, int
 		Stop:        req.StopSequences,
 	}
 
-	if sys, err := oaiSystemMessage(req.System); err != nil {
-		return nil, 0, err
-	} else if sys != nil {
-		out.Messages = append(out.Messages, *sys)
+	if s := reqconv.ExtractSystemPrompt(req.System); s != "" {
+		out.Messages = append(out.Messages, oaiMessage{Role: "system", Content: s})
 	}
 
 	docs := 0
@@ -90,26 +88,21 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, int
 }
 
 // anthRequest is the subset of an Anthropic Messages request that the
-// OpenAI conversion reads. Union-typed members (content, system,
-// tool_choice, tool input) are kept as raw JSON and decoded per case.
+// OpenAI conversion reads. Union-typed members that the Kiro types already
+// model (system, thinking) decode into those; the ones Kiro never reads
+// (tool_choice, tool input) are kept as raw JSON and decoded per case.
 type anthRequest struct {
-	Model         string            `json:"model"`
-	Messages      []anthMessage     `json:"messages"`
-	System        jsontext.Value    `json:"system,omitempty"`
-	Tools         []anthTool        `json:"tools,omitempty"`
-	ToolChoice    jsontext.Value    `json:"tool_choice,omitempty"`
-	MaxTokens     int               `json:"max_tokens,omitempty"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	TopP          *float64          `json:"top_p,omitempty"`
-	StopSequences []string          `json:"stop_sequences,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	Thinking      *anthThinkingSpec `json:"thinking,omitempty"`
-}
-
-// anthThinkingSpec mirrors the request's thinking configuration.
-type anthThinkingSpec struct {
-	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Model         string                    `json:"model"`
+	Messages      []anthMessage             `json:"messages"`
+	System        anthropic.SystemPrompt    `json:"system,omitzero"`
+	Tools         []anthTool                `json:"tools,omitempty"`
+	ToolChoice    jsontext.Value            `json:"tool_choice,omitempty"`
+	MaxTokens     int                       `json:"max_tokens,omitempty"`
+	Temperature   *float64                  `json:"temperature,omitempty"`
+	TopP          *float64                  `json:"top_p,omitempty"`
+	StopSequences []string                  `json:"stop_sequences,omitempty"`
+	Stream        bool                      `json:"stream,omitempty"`
+	Thinking      *anthropic.ThinkingConfig `json:"thinking,omitempty"`
 }
 
 // anthMessage is one Messages request entry; content is string or block
@@ -166,43 +159,6 @@ type oaiToolChoiceFunction struct {
 	Name string `json:"name"`
 }
 
-// oaiSystemMessage converts the request's system prompt to a Chat
-// Completions system message, or nil when nothing remains after filtering.
-func oaiSystemMessage(sys jsontext.Value) (*oaiMessage, error) {
-	if len(sys) == 0 || sys.Kind() == jsontext.KindNull {
-		return nil, nil
-	}
-	switch sys.Kind() {
-	case jsontext.KindString:
-		var s string
-		if err := json.Unmarshal(sys, &s); err != nil {
-			return nil, fmt.Errorf("decode system: %w", err)
-		}
-		if s == "" {
-			return nil, nil
-		}
-		return &oaiMessage{Role: "system", Content: s}, nil
-	case jsontext.KindBeginArray:
-		var blocks []anthBlock
-		if err := json.Unmarshal(sys, &blocks); err != nil {
-			return nil, fmt.Errorf("decode system blocks: %w", err)
-		}
-		var parts []string
-		for _, b := range blocks {
-			if b.Type != "text" || b.Text == "" || reqconv.IsBillingHeaderBlock(b.Text) {
-				continue
-			}
-			parts = append(parts, b.Text)
-		}
-		if len(parts) == 0 {
-			return nil, nil
-		}
-		return &oaiMessage{Role: "system", Content: strings.Join(parts, "\n")}, nil
-	default:
-		return nil, fmt.Errorf("system: unsupported JSON kind %s", sys.Kind())
-	}
-}
-
 // oaiConvertMessage converts one Anthropic message to zero or more Chat
 // Completions messages; tool_result-heavy user turns expand into several.
 // docs accumulates the document blocks replaced with the placeholder.
@@ -216,15 +172,16 @@ func oaiConvertMessage(m *anthMessage, docs *int) ([]oaiMessage, error) {
 		// Claude Code injects mid-conversation system turns (session-start
 		// hooks and the like). Chat Completions allows a system message in
 		// any position, so it converts in place with the same block rules
-		// as the top-level system; an empty turn produces no message.
-		sys, err := oaiSystemMessage(m.Content)
-		if err != nil {
+		// as the top-level system (string as-is, text blocks joined,
+		// billing block filtered); an empty turn produces no message.
+		var sp anthropic.SystemPrompt
+		if err := json.Unmarshal(m.Content, &sp); err != nil {
 			return nil, fmt.Errorf("system message: %w", err)
 		}
-		if sys == nil {
-			return nil, nil
+		if s := reqconv.ExtractSystemPrompt(sp); s != "" {
+			return []oaiMessage{{Role: "system", Content: s}}, nil
 		}
-		return []oaiMessage{*sys}, nil
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unsupported role %q", m.Role)
 	}
