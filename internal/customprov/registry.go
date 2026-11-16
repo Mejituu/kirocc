@@ -24,6 +24,11 @@ type Model struct {
 	// enable_thinking:false; its requests omit the field entirely so the
 	// model keeps thinking.
 	AlwaysThinking bool
+
+	// WebSearch marks a model whose provider runs the web_search server-side
+	// tool natively — the anthropic protocol forwards the declaration with a
+	// fixed billing-header block, the openai protocol sets enable_search.
+	WebSearch bool
 }
 
 // trimOneMSuffix strips a trailing [1m] context marker, case-insensitively —
@@ -62,6 +67,10 @@ type Hit struct {
 	// AlwaysThinking reports an openai-protocol model that rejects
 	// enable_thinking:false, so its requests omit the field.
 	AlwaysThinking bool
+
+	// WebSearch reports a model declared with web_search, so its requests
+	// activate the provider's native search.
+	WebSearch bool
 }
 
 // modelMatch is the registry entry a display name resolves to: the provider
@@ -99,7 +108,7 @@ func (r *Registry) Lookup(model string) (Hit, bool) {
 	if !ok {
 		return Hit{}, false
 	}
-	return Hit{Provider: m.provider, BaseModel: m.model.ID, Config1M: m.model.Context1M, AlwaysThinking: m.model.AlwaysThinking}, true
+	return Hit{Provider: m.provider, BaseModel: m.model.ID, Config1M: m.model.Context1M, AlwaysThinking: m.model.AlwaysThinking, WebSearch: m.model.WebSearch}, true
 }
 
 // lookupModel resolves a mapping target: the model with exactly this id in
@@ -115,7 +124,7 @@ func (r *Registry) lookupModel(providerName, id string) (Hit, bool) {
 	}
 	for _, m := range p.Models {
 		if m.ID == id {
-			return Hit{Provider: p, BaseModel: m.ID, Config1M: m.Context1M, AlwaysThinking: m.AlwaysThinking}, true
+			return Hit{Provider: p, BaseModel: m.ID, Config1M: m.Context1M, AlwaysThinking: m.AlwaysThinking, WebSearch: m.WebSearch}, true
 		}
 	}
 	return Hit{}, false

@@ -631,6 +631,86 @@ func TestLookupModelCarriesAlwaysThinking(t *testing.T) {
 	}
 }
 
+// TestLoadWebSearch covers the web_search model flag: the object form turns
+// it on, the string shorthand and an omitted field stay off, and both
+// protocols accept it (unlike always_thinking).
+func TestLoadWebSearch(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{
+			name:     "anthropic protocol object form",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"qwen3.8-max","web_search":true}]}`,
+			want:     true,
+		},
+		{
+			name:     "openai protocol object form",
+			provider: `{"base_url":"http://p","auth_token":"t","protocol":"openai","models":[{"id":"qwen3.8-max","web_search":true}]}`,
+			want:     true,
+		},
+		{
+			name:     "object form without the field defaults to false",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"qwen3.8-max"}]}`,
+			want:     false,
+		},
+		{
+			name:     "string shorthand stays false",
+			provider: `{"base_url":"http://p","auth_token":"t","models":["qwen3.8-max"]}`,
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg, err := loadTestRegistry(t, `{"providers": {"p": `+tt.provider+`}}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := reg.providers[0].Models[0]
+			if m.WebSearch != tt.want {
+				t.Errorf("Models[0].WebSearch = %v, want %v", m.WebSearch, tt.want)
+			}
+		})
+	}
+}
+
+// TestLookupCarriesWebSearch asserts both lookup paths hand the flag to the
+// Hit: Lookup (the claude- display-name match) and lookupModel (the target
+// of session-following mappings, exercised through a mapping rule).
+func TestLookupCarriesWebSearch(t *testing.T) {
+	reg, err := loadTestRegistry(t, `{"providers": {"p": {
+		"base_url": "http://p", "auth_token": "t",
+		"models": [{"id": "qwen3.8-max", "web_search": true}, {"id": "n"}],
+		"mappings": [{"model": "other", "to": {"model": "qwen3.8-max"}}]
+	}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hit, ok := reg.Lookup("claude-qwen3.8-max")
+	if !ok {
+		t.Fatal("Lookup missed")
+	}
+	if !hit.WebSearch {
+		t.Error("hit.WebSearch = false, want true for the configured model")
+	}
+	hit, ok = reg.Lookup("claude-n")
+	if !ok {
+		t.Fatal("Lookup missed")
+	}
+	if hit.WebSearch {
+		t.Error("hit.WebSearch = true, want false for a plain model")
+	}
+	hit, ok = reg.lookupModel("p", "qwen3.8-max")
+	if !ok {
+		t.Fatal("lookupModel missed")
+	}
+	if !hit.WebSearch {
+		t.Error("hit.WebSearch = false, want true for the mapping target")
+	}
+}
+
 func TestLoadFile_PermissionWarning(t *testing.T) {
 	buf := captureSlog(t)
 	path := filepath.Join(t.TempDir(), "mejituu.json5")

@@ -32,6 +32,10 @@ type RequestInfo struct {
 	Model  string `json:"model"`
 	Stream bool   `json:"stream"`
 
+	// Tools carries the request's tool definitions, decoded by the same peek;
+	// only the web_search server-side tool is inspected.
+	Tools []anthropic.Tool `json:"tools,omitempty"`
+
 	// Thinking and OutputConfig are peeked only for the request log; the
 	// forwarded bytes are untouched. Only the string members kirocc logs
 	// are declared, so other fields (budget_tokens, …) decode fine — a
@@ -48,6 +52,12 @@ type thinkingPeek struct {
 // outputConfigPeek mirrors the request's output_config field for the log.
 type outputConfigPeek struct {
 	Effort string `json:"effort"`
+}
+
+// HasWebSearch reports whether the request declares the web_search
+// server-side tool.
+func (info RequestInfo) HasWebSearch() bool {
+	return anthropic.FindWebSearchTool(info.Tools) != nil
 }
 
 // Proxy forwards matched requests to their custom provider. It deliberately
@@ -137,7 +147,15 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		slog.InfoContext(ctx, "--> POST /v1/messages", requestLogArgs(ctx, short, hit, info)...)
 	}
 
-	body, err := RewriteForward(raw, hit.BaseModel)
+	// A1 trigger: web search runs natively on the provider only when the
+	// model opted in (web_search in the config) and the request declares the
+	// tool. RewriteForward then swaps the per-request billing block for the
+	// stable fixed one so the provider's prompt-prefix cache survives.
+	ws := info.HasWebSearch() && hit.WebSearch
+	if ws {
+		slog.InfoContext(ctx, "web search enabled", "trace_id", short, "provider", hit.Provider.Name, "mode", "native")
+	}
+	body, err := RewriteForward(raw, hit.BaseModel, ws)
 	if err != nil {
 		slog.ErrorContext(ctx, "custom provider request rewrite failed", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest, "invalid request: "+err.Error())

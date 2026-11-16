@@ -120,6 +120,10 @@ type modelSpec struct {
 	// AlwaysThinking is only meaningful for openai-protocol providers; the
 	// buildRegistry loop rejects it on anthropic providers.
 	AlwaysThinking bool `json:"always_thinking,omitempty"`
+
+	// WebSearch turns on the provider's native web search for this model;
+	// allowed on both protocols.
+	WebSearch bool `json:"web_search,omitempty"`
 }
 
 // mappingRule is one entry of a mappings group.
@@ -364,7 +368,7 @@ func buildModel(path, providerName string, i int, entry modelEntry) (Model, erro
 		if display == "" {
 			display = s.ID
 		}
-		return Model{ID: s.ID, Display: display, Context1M: s.Context1M, Label: s.Label, AlwaysThinking: s.AlwaysThinking}, nil
+		return Model{ID: s.ID, Display: display, Context1M: s.Context1M, Label: s.Label, AlwaysThinking: s.AlwaysThinking, WebSearch: s.WebSearch}, nil
 	}
 	if entry.String == "" {
 		return Model{}, fmt.Errorf("%s: providers.%s.models[%d].id must not be empty", path, providerName, i)
