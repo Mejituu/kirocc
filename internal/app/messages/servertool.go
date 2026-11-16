@@ -177,6 +177,7 @@ func (o *serverToolOrchestrator) handleStreaming(ctx context.Context, session *s
 		var upstreamMessage string
 
 		err = kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
+			markFirstContent(ctx, e)
 			if streamErr || localStop {
 				return true
 			}
@@ -441,6 +442,7 @@ func (o *serverToolOrchestrator) handleNonStreaming(ctx context.Context, w http.
 		var interceptedName string
 		var interceptedInput string
 		err = kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
+			markFirstContent(ctx, e)
 			d := acc.ProcessEvent(e)
 			if d.IsError {
 				hasError = true

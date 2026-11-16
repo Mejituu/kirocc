@@ -3,6 +3,8 @@ package customprov
 import (
 	"bytes"
 	"encoding/json/v2"
+
+	"github.com/d-kuro/kirocc/internal/timing"
 )
 
 // usagePeek mirrors the usage object of an Anthropic response. Only the
@@ -56,6 +58,10 @@ type scanUsage struct {
 	usage   observedUsage
 	found   bool
 	pending []byte
+
+	// timer notes the first content_block_delta for the response log's ttft;
+	// a nil timer is inert.
+	timer *timing.Request
 }
 
 // feed consumes one forwarded chunk.
@@ -93,6 +99,10 @@ func (s *scanUsage) line(line []byte) {
 			s.usage = observedUsage{inputTokens: contextOccupancy(ev.Message.Usage), outputTokens: ev.Message.Usage.OutputTokens}
 			s.found = true
 		}
+	case "content_block_delta":
+		// The first delta of any kind — text, thinking or tool-call input —
+		// is the response's first byte.
+		s.timer.MarkFirst()
 	case "message_delta":
 		if ev.Usage != nil {
 			s.found = true

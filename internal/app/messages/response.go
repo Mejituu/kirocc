@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -17,6 +18,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/respconv"
+	"github.com/d-kuro/kirocc/internal/timing"
 )
 
 // roundCredits rounds credit consumption to 3 decimals for human-readable
@@ -50,6 +52,7 @@ func (s *Service) handleStreamingResponse(ctx context.Context, session *streamSe
 	var upstreamMessage string
 	err := kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 		capture.recordEvent(e)
+		markFirstContent(ctx, e)
 		if streamErr || localStop {
 			return true
 		}
@@ -185,6 +188,7 @@ func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.Respons
 	var upstreamMessage string
 	err := kiroproto.ParseStream(ctx, apiResp.Body, func(e kiroproto.Event) bool {
 		capture.recordEvent(e)
+		markFirstContent(ctx, e)
 		d := acc.ProcessEvent(e)
 		if d.IsError {
 			hasError = true
@@ -258,6 +262,24 @@ func (s *Service) handleNonStreamingResponse(ctx context.Context, w http.Respons
 	return ""
 }
 
+// markFirstContent notes the first upstream content event — visible text,
+// reasoning, or a tool call — on the request's timing record, for the ttft
+// field of the response log.
+func markFirstContent(ctx context.Context, e kiroproto.Event) {
+	switch e.Type {
+	case kiroproto.EventAssistantResponse:
+		if e.Content != "" {
+			timing.From(ctx).MarkFirst()
+		}
+	case kiroproto.EventReasoningContent:
+		if e.ThinkingText != "" {
+			timing.From(ctx).MarkFirst()
+		}
+	case kiroproto.EventToolUse:
+		timing.From(ctx).MarkFirst()
+	}
+}
+
 // logResponseStats logs response completion, records it in the process usage
 // totals and warns on context limit exceeded.
 func (s *Service) logResponseStats(ctx context.Context, short, model string, inputTokens, outputTokens int, hasContextUsage bool, contextUsagePct float64, contextWindowSize int, credits float64, hasCredits bool) {
@@ -275,6 +297,9 @@ func (s *Service) logResponseStats(ctx context.Context, short, model string, inp
 		"output_tokens", outputTokens,
 		"context_usage", contextUsage,
 	}
+	// The Kiro path's responses are all ParseStream event streams, so the
+	// speed is always measured from the first content event.
+	args = append(args, timing.From(ctx).LogArgs(outputTokens, time.Now(), true)...)
 	snap := s.usage.Record(model, inputTokens, outputTokens, credits)
 	if hasCredits {
 		rounded := roundCredits(credits)

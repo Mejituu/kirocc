@@ -10,6 +10,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/httpx"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
 	"github.com/d-kuro/kirocc/internal/logging"
+	"github.com/d-kuro/kirocc/internal/timing"
 )
 
 // invocation bundles everything callAndHandle needs for one upstream attempt.
@@ -31,6 +32,10 @@ type invocation struct {
 // that transparent retry.
 func (s *Service) callAndHandle(ctx context.Context, w http.ResponseWriter, session *streamSession, inv *invocation, attempt int) string {
 	_, short := logging.TraceIDs(ctx)
+	// Each attempt starts with a clean first byte: a discarded attempt's
+	// first byte must not count, while the start (and thus ttft's baseline)
+	// stays at the original request.
+	timing.From(ctx).ResetFirst()
 	capture := newUpstreamAttemptCapture(ctx, s.captureEnabled, inv.payload, inv.model, inv.thinking, inv.req.Stream, attempt)
 
 	apiResp, err := s.client.GenerateAssistantResponse(ctx, inv.creds.AccessToken, inv.payload, inv.creds.Region)

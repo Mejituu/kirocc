@@ -15,6 +15,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/reqconv"
+	"github.com/d-kuro/kirocc/internal/timing"
 	"github.com/d-kuro/kirocc/internal/toolsearch"
 	"github.com/d-kuro/kirocc/internal/websearch"
 	"github.com/google/uuid"
@@ -25,6 +26,7 @@ const headerCCSessionID = "X-Claude-Code-Session-Id"
 func (s *Service) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	traceID, short := logging.TraceIDs(ctx)
+	ctx, _ = timing.Start(ctx)
 
 	if s.maybeForwardCustom(ctx, w, r, customprov.EndpointMessages) {
 		return
@@ -224,6 +226,8 @@ func (s *Service) runServerToolsWithRetry(ctx context.Context, w http.ResponseWr
 		return
 	}
 	slog.WarnContext(ctx, "retrying server tool loop after empty visible end_turn", "trace_id", short)
+	// The discarded run's first byte must not count, like callAndHandle's retry.
+	timing.From(ctx).ResetFirst()
 	if r2 := orch.run(ctx, w, session); r2 == retryReasonEmptyVisibleEndTurn {
 		slog.ErrorContext(ctx, "server tool retry also returned empty visible end_turn", "trace_id", short)
 		if session != nil {

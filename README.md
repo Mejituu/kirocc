@@ -241,6 +241,8 @@ Each response line that reports credits then carries the process running total a
 INF <-- POST /v1/messages ... credits=1.234 session_credits=15.678 remaining_est=1249.762
 ```
 
+The response line also carries the request's latency: `ttft` (time to first token — from when kirocc received the request until the upstream first produced content: text, reasoning, or a tool call; retries count into it, but only the attempt the client actually receives contributes the first token), `tps` (output tokens per second over the generation span, from the first token to the end of the response; non-streaming provider responses report `tps_total`, output tokens per second over the whole request, instead), and `duration` (total time from request receipt to response completion, rounded to milliseconds). `ttft` and `tps` are omitted when they cannot be measured — no content arrived, fewer than two output tokens, or an upstream error.
+
 On shutdown (SIGINT / `Ctrl+C` or SIGTERM), totals for the session, overall and per model, once any request has completed:
 
 ```

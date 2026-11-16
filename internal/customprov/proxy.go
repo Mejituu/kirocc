@@ -15,6 +15,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/httpx"
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/models"
+	"github.com/d-kuro/kirocc/internal/timing"
 )
 
 // Endpoint selects the provider API a matched request is forwarded to.
@@ -120,7 +121,13 @@ func (p *Proxy) ListModels() []ModelInfo {
 // warning when the provider answered with an error status.
 func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Header, raw []byte, hit Hit, info RequestInfo, endpoint Endpoint) {
 	traceID, short := logging.TraceIDs(ctx)
-	start := time.Now()
+	// The timer starts when kirocc received the request — maybeForwardCustom
+	// put it in ctx (creating it for count_tokens, whose callers do not start
+	// one). Forward is also called directly in tests, hence the fallback.
+	timer := timing.From(ctx)
+	if timer == nil {
+		ctx, timer = timing.Start(ctx)
+	}
 	logPair := endpoint == EndpointMessages
 	if logPair {
 		slog.InfoContext(ctx, "--> POST /v1/messages", requestLogArgs(ctx, short, hit, info)...)
@@ -187,7 +194,7 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 	if logPair {
 		switch mediaType(resp.Header.Get("Content-Type")) {
 		case "text/event-stream":
-			scanner = &scanUsage{}
+			scanner = &scanUsage{timer: timer}
 		case "application/json":
 			if resp.StatusCode < 400 {
 				jsonBody = []byte{}
@@ -252,12 +259,21 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode)
 		var pct float64
 		var contextUsage string
+		var outTokens int
 		if usage != nil {
 			pct = float64(usage.inputTokens) * 100 / float64(contextWindow(hit))
 			contextUsage = fmt.Sprintf("%.1fk(%.1f%%)", float64(usage.inputTokens)/1000, pct)
+			outTokens = usage.outputTokens
 			args = append(args, "input_tokens", usage.inputTokens, "output_tokens", usage.outputTokens, "context_usage", contextUsage)
 		}
-		args = append(args, "duration", time.Since(start))
+		// An error response carries no meaningful speed signal, so it logs
+		// only the duration.
+		now := time.Now()
+		if resp.StatusCode < 400 {
+			args = append(args, timer.LogArgs(outTokens, now, scanner != nil)...)
+		} else {
+			args = append(args, timer.DurationArgs(now)...)
+		}
 		slog.InfoContext(ctx, "<-- POST /v1/messages", args...)
 		// Mirror the Kiro path's warning when the context window is full.
 		if pct >= 100 {

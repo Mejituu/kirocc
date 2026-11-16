@@ -17,6 +17,7 @@ import (
 	"github.com/d-kuro/kirocc/internal/logging"
 	"github.com/d-kuro/kirocc/internal/models"
 	"github.com/d-kuro/kirocc/internal/reqconv"
+	"github.com/d-kuro/kirocc/internal/timing"
 	"github.com/d-kuro/kirocc/internal/tokencount"
 )
 
@@ -33,6 +34,9 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 	if s.custom == nil {
 		return false
 	}
+	// HandleMessages starts the timing record before this call; count_tokens
+	// reaches here without one, so start it here (Start reuses when present).
+	ctx, _ = timing.Start(ctx)
 	traceID, short := logging.TraceIDs(ctx)
 
 	raw, err := readRawRequestBody(w, r, s.maxRequestBody)
