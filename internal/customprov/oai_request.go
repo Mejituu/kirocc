@@ -14,17 +14,17 @@ import (
 // buildOpenAIRequest converts an Anthropic Messages request body to an
 // OpenAI Chat Completions request. raw is the forwarded request bytes, hit
 // the resolved provider/model, info the peeked request summary. The second
-// return value is the number of document blocks replaced with
-// oaiDocumentPlaceholder, for the caller's warning log.
+// return value counts the image/document blocks replaced by placeholders,
+// for the caller's logs.
 //
 // Only the fields the conversion needs are decoded; everything else in raw
 // is ignored. The output is byte-stable for byte-identical input: tool_use
 // arguments are canonicalized (sorted keys, no whitespace) so prompt-prefix
 // caching upstream keeps hitting, and message order follows block order.
-func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, int, error) {
+func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, mediaCounts, error) {
 	var req anthRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return nil, 0, fmt.Errorf("decode anthropic request: %w", err)
+		return nil, mediaCounts{}, fmt.Errorf("decode anthropic request: %w", err)
 	}
 
 	out := &oaiRequest{
@@ -39,11 +39,11 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, int
 		out.Messages = append(out.Messages, oaiMessage{Role: "system", Content: s})
 	}
 
-	docs := 0
+	var counts mediaCounts
 	for i := range req.Messages {
-		msgs, err := oaiConvertMessage(&req.Messages[i], &docs)
+		msgs, err := oaiConvertMessage(&req.Messages[i], &counts, hit.TextOnly)
 		if err != nil {
-			return nil, 0, fmt.Errorf("message %d: %w", i, err)
+			return nil, mediaCounts{}, fmt.Errorf("message %d: %w", i, err)
 		}
 		out.Messages = append(out.Messages, msgs...)
 	}
@@ -51,7 +51,7 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, int
 	for i := range req.Tools {
 		tool, ok, err := oaiConvertTool(&req.Tools[i])
 		if err != nil {
-			return nil, 0, fmt.Errorf("tool %d: %w", i, err)
+			return nil, mediaCounts{}, fmt.Errorf("tool %d: %w", i, err)
 		}
 		if ok {
 			out.Tools = append(out.Tools, tool)
@@ -60,7 +60,7 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, int
 
 	choice, ok, err := oaiConvertToolChoice(req.ToolChoice)
 	if err != nil {
-		return nil, 0, err
+		return nil, mediaCounts{}, err
 	}
 	if ok {
 		out.ToolChoice = choice
@@ -84,7 +84,7 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, int
 		out.ThinkingBudget = req.Thinking.BudgetTokens
 	}
 
-	return out, docs, nil
+	return out, counts, nil
 }
 
 // anthRequest is the subset of an Anthropic Messages request that the
@@ -161,8 +161,9 @@ type oaiToolChoiceFunction struct {
 
 // oaiConvertMessage converts one Anthropic message to zero or more Chat
 // Completions messages; tool_result-heavy user turns expand into several.
-// docs accumulates the document blocks replaced with the placeholder.
-func oaiConvertMessage(m *anthMessage, docs *int) ([]oaiMessage, error) {
+// counts accumulates the media blocks replaced with placeholders. textOnly
+// turns image blocks into text markers instead of image_url parts.
+func oaiConvertMessage(m *anthMessage, counts *mediaCounts, textOnly bool) ([]oaiMessage, error) {
 	if len(m.Content) == 0 || m.Content.Kind() == jsontext.KindNull {
 		return nil, nil
 	}
@@ -200,7 +201,7 @@ func oaiConvertMessage(m *anthMessage, docs *int) ([]oaiMessage, error) {
 		return nil, fmt.Errorf("decode content blocks: %w", err)
 	}
 	if m.Role == "user" {
-		return oaiConvertUserBlocks(blocks, docs)
+		return oaiConvertUserBlocks(blocks, counts, textOnly)
 	}
 	return oaiConvertAssistantBlocks(blocks)
 }
@@ -209,15 +210,17 @@ func oaiConvertMessage(m *anthMessage, docs *int) ([]oaiMessage, error) {
 // the conversion: the Chat Completions request kirocc builds carries no
 // documents, so the model at least sees that one existed, in place, and a
 // document-only turn stays non-empty.
-const oaiDocumentPlaceholder = "[document omitted: OpenAI-protocol providers do not support document blocks]"
+const oaiDocumentPlaceholder = documentOmittedMarker
 
 // oaiConvertUserBlocks converts a user message's content blocks, preserving
 // block order: ordinary text/image blocks accumulate into user messages,
 // document blocks become placeholder text (see oaiDocumentPlaceholder),
 // tool_result blocks become tool messages, and images inside tool results
 // (which Chat tool messages cannot carry) move into a synthesized user
-// message right after the run of tool messages they came from.
-func oaiConvertUserBlocks(blocks []anthBlock, docs *int) ([]oaiMessage, error) {
+// message right after the run of tool messages they came from. With textOnly,
+// image blocks become text markers and tool-result images fold into the tool
+// text instead, so no synthetic user message is produced.
+func oaiConvertUserBlocks(blocks []anthBlock, counts *mediaCounts, textOnly bool) ([]oaiMessage, error) {
 	var out []oaiMessage
 	var parts []oaiContentPart // pending ordinary text/image parts, in block order
 	var toolImages []oaiContentPart
@@ -256,18 +259,21 @@ func oaiConvertUserBlocks(blocks []anthBlock, docs *int) ([]oaiMessage, error) {
 			}
 		case "image":
 			flushToolImages()
-			if p, ok := oaiImagePart(b.Source); ok {
+			if textOnly {
+				counts.add(mediaCounts{images: 1})
+				parts = append(parts, oaiContentPart{Type: "text", Text: imageOmittedMarker})
+			} else if p, ok := oaiImagePart(b.Source); ok {
 				parts = append(parts, p)
 			}
 		case "document":
 			// Replaced, not skipped: silently vanishing content is worse
 			// than a visible marker, and the request stays valid.
 			flushToolImages()
-			*docs++
+			counts.add(mediaCounts{documents: 1})
 			parts = append(parts, oaiContentPart{Type: "text", Text: oaiDocumentPlaceholder})
 		case "tool_result":
 			flushParts()
-			text, images, err := oaiToolResultContent(b, docs)
+			text, images, err := oaiToolResultContent(b, counts, textOnly)
 			if err != nil {
 				return nil, fmt.Errorf("tool_result %s: %w", b.ToolUseID, err)
 			}
@@ -295,8 +301,9 @@ func oaiHasImagePart(parts []oaiContentPart) bool {
 
 // oaiToolResultContent splits a tool_result's content into its text (string
 // form used as-is, block form joined from text blocks; document blocks
-// become the placeholder) and image parts.
-func oaiToolResultContent(b anthBlock, docs *int) (string, []oaiContentPart, error) {
+// become the placeholder) and image parts. With textOnly, images become text
+// markers in the returned text instead of image parts.
+func oaiToolResultContent(b anthBlock, counts *mediaCounts, textOnly bool) (string, []oaiContentPart, error) {
 	if len(b.Content) == 0 || b.Content.Kind() == jsontext.KindNull {
 		return "", nil, nil
 	}
@@ -319,11 +326,14 @@ func oaiToolResultContent(b anthBlock, docs *int) (string, []oaiContentPart, err
 			case "text":
 				texts = append(texts, c.Text)
 			case "image":
-				if p, ok := oaiImagePart(c.Source); ok {
+				if textOnly {
+					counts.add(mediaCounts{images: 1})
+					texts = append(texts, imageOmittedMarker)
+				} else if p, ok := oaiImagePart(c.Source); ok {
 					images = append(images, p)
 				}
 			case "document":
-				*docs++
+				counts.add(mediaCounts{documents: 1})
 				texts = append(texts, oaiDocumentPlaceholder)
 			}
 		}

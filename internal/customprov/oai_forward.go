@@ -59,18 +59,25 @@ func (p *Proxy) forwardOpenAI(ctx context.Context, w http.ResponseWriter, h http
 		}
 	}
 
-	oaiReq, docs, err := buildOpenAIRequest(raw, hit, info)
+	oaiReq, counts, err := buildOpenAIRequest(raw, hit, info)
 	if err != nil {
 		slog.ErrorContext(ctx, "custom provider request conversion failed", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest, "invalid request: "+err.Error())
 		return
 	}
+	reason := ""
+	if hit.TextOnly {
+		reason = "declared"
+	}
+	if counts.images > 0 {
+		logMediaReplaced(ctx, short, hit, counts, reason)
+	}
 	// One warning per request, whatever the count: the conversion replaced
 	// document blocks (PDF and the like) the Chat protocol cannot carry. The
 	// payload stays out — only the count is logged.
-	if docs > 0 {
+	if counts.documents > 0 {
 		args := appendSessionID(ctx, []any{"trace_id", short})
-		args = append(args, "provider", hit.Provider.Name, "count", docs)
+		args = append(args, "provider", hit.Provider.Name, "count", counts.documents)
 		slog.WarnContext(ctx, "custom provider document dropped", args...)
 	}
 	// The web_search exception to the toolPeek gate above, mirroring

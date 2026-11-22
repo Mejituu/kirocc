@@ -10,15 +10,21 @@ import (
 )
 
 // buildForTest runs buildOpenAIRequest on raw with a fixed hit, failing the
-// test on any conversion error. The second value is the document
-// replacement count, for the tests that assert it.
-func buildForTest(t *testing.T, raw string) (*oaiRequest, int) {
+// test on any conversion error. The second value counts the replaced media.
+func buildForTest(t *testing.T, raw string) (*oaiRequest, mediaCounts) {
 	t.Helper()
-	req, docs, err := buildOpenAIRequest([]byte(raw), Hit{BaseModel: "glm-5.3"}, RequestInfo{Model: "claude-glm-5.3"})
+	return buildForTestWithHit(t, raw, Hit{BaseModel: "glm-5.3"})
+}
+
+// buildForTestWithHit is buildForTest with an explicit hit, for the
+// text_only cases.
+func buildForTestWithHit(t *testing.T, raw string, hit Hit) (*oaiRequest, mediaCounts) {
+	t.Helper()
+	req, counts, err := buildOpenAIRequest([]byte(raw), hit, RequestInfo{Model: "claude-" + hit.BaseModel})
 	if err != nil {
 		t.Fatalf("buildOpenAIRequest: %v", err)
 	}
-	return req, docs
+	return req, counts
 }
 
 // assertMessages compares converted messages against want, marshaling both
@@ -537,7 +543,7 @@ func TestBuildOpenAIRequest_MidConversationSystem(t *testing.T) {
 // non-empty message, and the replacement count adds up.
 func TestBuildOpenAIRequest_DocumentPlaceholder(t *testing.T) {
 	t.Run("user text and document interleaved keeps position", func(t *testing.T) {
-		req, docs := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
+		req, counts := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
 			{"role":"user","content":[
 				{"type":"text","text":"before"},
 				{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}},
@@ -547,13 +553,13 @@ func TestBuildOpenAIRequest_DocumentPlaceholder(t *testing.T) {
 		assertMessages(t, req.Messages, []oaiMessage{
 			{Role: "user", Content: "before\n" + oaiDocumentPlaceholder + "\nafter"},
 		})
-		if docs != 1 {
-			t.Errorf("docs = %d, want 1", docs)
+		if counts.documents != 1 {
+			t.Errorf("documents = %d, want 1", counts.documents)
 		}
 	})
 
 	t.Run("document in tool_result content joins the text", func(t *testing.T) {
-		req, docs := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
+		req, counts := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
 			{"role":"user","content":[
 				{"type":"tool_result","tool_use_id":"t1","content":[
 					{"type":"text","text":"result text"},
@@ -564,13 +570,13 @@ func TestBuildOpenAIRequest_DocumentPlaceholder(t *testing.T) {
 		assertMessages(t, req.Messages, []oaiMessage{
 			{Role: "tool", ToolCallID: "t1", Content: "result text\n" + oaiDocumentPlaceholder},
 		})
-		if docs != 1 {
-			t.Errorf("docs = %d, want 1", docs)
+		if counts.documents != 1 {
+			t.Errorf("documents = %d, want 1", counts.documents)
 		}
 	})
 
 	t.Run("document-only user message stays non-empty", func(t *testing.T) {
-		req, docs := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
+		req, counts := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
 			{"role":"user","content":[
 				{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}
 			]}
@@ -578,13 +584,13 @@ func TestBuildOpenAIRequest_DocumentPlaceholder(t *testing.T) {
 		assertMessages(t, req.Messages, []oaiMessage{
 			{Role: "user", Content: oaiDocumentPlaceholder},
 		})
-		if docs != 1 {
-			t.Errorf("docs = %d, want 1", docs)
+		if counts.documents != 1 {
+			t.Errorf("documents = %d, want 1", counts.documents)
 		}
 	})
 
 	t.Run("count adds up across messages and forms", func(t *testing.T) {
-		_, docs := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
+		_, counts := buildForTest(t, `{"model":"claude-x","max_tokens":16,"messages":[
 			{"role":"user","content":[
 				{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}},
 				{"type":"text","text":"run"},
@@ -596,10 +602,58 @@ func TestBuildOpenAIRequest_DocumentPlaceholder(t *testing.T) {
 				]}
 			]}
 		]}`)
-		if docs != 3 {
-			t.Errorf("docs = %d, want 3", docs)
+		if counts.documents != 3 {
+			t.Errorf("documents = %d, want 3", counts.documents)
 		}
 	})
+}
+
+func TestBuildOpenAIRequest_TextOnlyImagePlaceholder(t *testing.T) {
+	req, counts := buildForTestWithHit(t, `{"model":"claude-x","max_tokens":16,"messages":[
+		{"role":"user","content":[
+			{"type":"text","text":"look at this"},
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}
+		]}
+	]}`, Hit{BaseModel: "glm-5.3", TextOnly: true})
+	assertMessages(t, req.Messages, []oaiMessage{
+		{Role: "user", Content: "look at this\n" + imageOmittedMarker},
+	})
+	if counts.images != 1 || counts.documents != 0 {
+		t.Errorf("counts = %+v, want 1 image and 0 documents", counts)
+	}
+}
+
+func TestBuildOpenAIRequest_TextOnlyToolResultImageFoldsIntoText(t *testing.T) {
+	req, counts := buildForTestWithHit(t, `{"model":"claude-x","max_tokens":16,"messages":[
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"tu_1","content":[
+				{"type":"text","text":"screenshot:"},
+				{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"QUJD"}}
+			]}
+		]}
+	]}`, Hit{BaseModel: "glm-5.3", TextOnly: true})
+	assertMessages(t, req.Messages, []oaiMessage{
+		{Role: "tool", ToolCallID: "tu_1", Content: "screenshot:\n" + imageOmittedMarker},
+	})
+	if counts.images != 1 {
+		t.Errorf("counts = %+v, want 1 image", counts)
+	}
+}
+
+func TestBuildOpenAIRequest_TextOnlyImageOnlyToolResultStaysNonEmpty(t *testing.T) {
+	req, counts := buildForTestWithHit(t, `{"model":"claude-x","max_tokens":16,"messages":[
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"tu_1","content":[
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}
+			]}
+		]}
+	]}`, Hit{BaseModel: "glm-5.3", TextOnly: true})
+	assertMessages(t, req.Messages, []oaiMessage{
+		{Role: "tool", ToolCallID: "tu_1", Content: imageOmittedMarker},
+	})
+	if counts.images != 1 {
+		t.Errorf("counts = %+v, want 1 image", counts)
+	}
 }
 
 func TestBuildOpenAIRequest_Stream(t *testing.T) {

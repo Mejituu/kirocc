@@ -469,6 +469,60 @@ func TestForwardOpenAI_DocumentDroppedWarn(t *testing.T) {
 	}
 }
 
+// TestForwardOpenAI_TextOnlyMediaReplacedLog pins the proactive image
+// replacement log for a text_only model.
+func TestForwardOpenAI_TextOnlyMediaReplacedLog(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(oaiChatCompletion))
+	}))
+	defer upstream.Close()
+
+	reg, err := loadTestRegistry(t, `{"providers": {"zhipu": {
+		"base_url": "`+upstream.URL+`", "auth_token": "secret-token", "protocol": "openai",
+		"models": [{"id": "ZHIPU/GLM-5.3", "text_only": true}]
+	}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf := captureLogs(t, slog.LevelInfo)
+	raw := `{"model":"claude-ZHIPU/GLM-5.3","max_tokens":16,"messages":[
+		{"role":"user","content":[
+			{"type":"text","text":"look"},
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}
+		]}
+	]}`
+	w := forwardOpenAISend(t, NewProxy(reg, 5*time.Second), false, http.Header{}, raw)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(gotBody, "aGk=") || !strings.Contains(gotBody, imageOmittedMarker) {
+		t.Errorf("upstream body = %s, want the image replaced", gotBody)
+	}
+
+	rec := findLogRecord(t, buf, "custom provider media replaced")
+	attrs, _ := rec["attributes"].(map[string]any)
+	if attrs["provider"] != "zhipu" {
+		t.Errorf("log provider = %v, want zhipu", attrs["provider"])
+	}
+	if attrs["model"] != "ZHIPU/GLM-5.3" {
+		t.Errorf("log model = %v, want ZHIPU/GLM-5.3", attrs["model"])
+	}
+	if attrs["images"] != float64(1) {
+		t.Errorf("log images = %v, want 1", attrs["images"])
+	}
+	if attrs["documents"] != float64(0) {
+		t.Errorf("log documents = %v, want 0", attrs["documents"])
+	}
+	if attrs["reason"] != "declared" {
+		t.Errorf("log reason = %v, want declared", attrs["reason"])
+	}
+}
+
 func TestForwardOpenAI_ServerToolRejected(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("upstream must not be called for a server-tool request")
