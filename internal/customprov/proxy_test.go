@@ -47,6 +47,38 @@ func forward(t *testing.T, p *Proxy, upstream *httptest.Server, model string, cl
 	return w
 }
 
+func TestForward_TextOnlyReplacesMedia(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	reg, err := loadTestRegistry(t, `{"providers": {"p": {
+		"base_url": "`+upstream.URL+`", "auth_token": "t",
+		"models": [{"id": "glm-5.3", "text_only": true}]
+	}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxy(reg, 5*time.Second)
+	hit, ok := p.Lookup("claude-glm-5.3")
+	if !ok {
+		t.Fatal("Lookup missed")
+	}
+	raw := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	w := httptest.NewRecorder()
+	p.Forward(context.Background(), w, http.Header{}, []byte(raw), hit, RequestInfo{Model: "claude-glm-5.3"}, EndpointMessages)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if !strings.Contains(gotBody, "[image omitted]") || strings.Contains(gotBody, "aGk=") {
+		t.Errorf("upstream body = %s, want the image replaced", gotBody)
+	}
+}
+
 func TestForward_HeaderWhitelistAndAuth(t *testing.T) {
 	var gotHeaders http.Header
 	var gotBody string

@@ -8,10 +8,17 @@ import (
 	"testing"
 )
 
+// rewriteForwardNoMedia is RewriteForward with the media pass disabled: the
+// behavior the pre-media cases below pin.
+func rewriteForwardNoMedia(raw []byte, model string, webSearch bool) ([]byte, error) {
+	out, _, err := RewriteForward(raw, model, webSearch, mediaPolicy{})
+	return out, err
+}
+
 // forwardNoSearch is RewriteForward with web search off: the behavior the
 // pre-web-search cases below pin.
 func forwardNoSearch(raw []byte, model string) ([]byte, error) {
-	return RewriteForward(raw, model, false)
+	return rewriteForwardNoMedia(raw, model, false)
 }
 
 // webSearchHeaderBlock is the fixed block RewriteForward plants for web
@@ -323,7 +330,7 @@ func TestRewriteForward_WebSearchArray(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			in := `{"model":"claude-glm-5.3","system":` + tc.system + `,"max_tokens":16,"messages":[]}`
-			out, err := RewriteForward([]byte(in), "glm-5.3", true)
+			out, err := rewriteForwardNoMedia([]byte(in), "glm-5.3", true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -356,7 +363,7 @@ func TestRewriteForward_WebSearchString(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			in := `{"model":"claude-glm-5.3","system":` + tc.system + `,"messages":[]}`
-			out, err := RewriteForward([]byte(in), "glm-5.3", true)
+			out, err := rewriteForwardNoMedia([]byte(in), "glm-5.3", true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -383,7 +390,7 @@ func TestRewriteForward_WebSearchNoSystem(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := RewriteForward([]byte(tc.in), "glm-5.3", true)
+			out, err := rewriteForwardNoMedia([]byte(tc.in), "glm-5.3", true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -404,7 +411,7 @@ func TestRewriteForward_WebSearchSystemBeforeModel(t *testing.T) {
 	const sysText = `{"type":"text","text":"You are helpful."}`
 	t.Run("array system before model", func(t *testing.T) {
 		in := `{"system":[` + billing + `,` + sysText + `],"model":"claude-x","max_tokens":5}`
-		out, err := RewriteForward([]byte(in), "UP", true)
+		out, err := rewriteForwardNoMedia([]byte(in), "UP", true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -415,7 +422,7 @@ func TestRewriteForward_WebSearchSystemBeforeModel(t *testing.T) {
 	})
 	t.Run("string system before model", func(t *testing.T) {
 		in := `{"system":"plain","model":"claude-x","max_tokens":5}`
-		out, err := RewriteForward([]byte(in), "UP", true)
+		out, err := rewriteForwardNoMedia([]byte(in), "UP", true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -441,7 +448,7 @@ func TestRewriteForward_WebSearchOtherSystemShapes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			in := `{"system":` + tc.system + `,"model":"claude-x"}`
-			out, err := RewriteForward([]byte(in), "UP", true)
+			out, err := rewriteForwardNoMedia([]byte(in), "UP", true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -450,5 +457,229 @@ func TestRewriteForward_WebSearchOtherSystemShapes(t *testing.T) {
 				t.Errorf("output:\n got: %s\nwant: %s", out, want)
 			}
 		})
+	}
+}
+
+// TestRewriteForward_MediaPassLeavesNoMediaBodyByteIdentical pins the
+// byte-for-byte guarantee for a body with no media: enabling the media pass
+// must not change the output at all.
+func TestRewriteForward_MediaPassLeavesNoMediaBodyByteIdentical(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","system":[{"type":"text","text":"x-anthropic-billing-header: cch=abc"}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"text","text":"ok"}]}],"stream":true}`
+	base, baseCounts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !baseCounts.empty() {
+		t.Fatalf("disabled media pass counted %+v", baseCounts)
+	}
+	withMedia, counts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true, replaceDocuments: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !counts.empty() {
+		t.Fatalf("media pass counted %+v for a body with no media", counts)
+	}
+	if !bytes.Equal(base, withMedia) {
+		t.Errorf("media pass changed a no-media body:\nbase: %s\nwith: %s", base, withMedia)
+	}
+}
+
+func TestRewriteForward_ReplacesTopLevelImage(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, counts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.images != 1 || counts.documents != 0 {
+		t.Fatalf("counts = %+v, want 1 image and 0 documents", counts)
+	}
+	s := string(out)
+	if !strings.Contains(s, `{"type":"text","text":"[image omitted]"}`) {
+		t.Errorf("marker missing: %s", s)
+	}
+	if strings.Contains(s, "aGk=") {
+		t.Errorf("image payload survived: %s", s)
+	}
+	if !strings.Contains(s, `"text":"look"`) {
+		t.Errorf("sibling text block lost: %s", s)
+	}
+}
+
+func TestRewriteForward_ReplacesAssistantImage(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, counts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.images != 1 {
+		t.Fatalf("counts = %+v, want 1 image", counts)
+	}
+	if !strings.Contains(string(out), "[image omitted]") {
+		t.Errorf("assistant image not replaced: %s", out)
+	}
+}
+
+func TestRewriteForward_ImageOnlyTurnStaysNonEmpty(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, _, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Messages []struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("rewritten body is not valid JSON: %v\n%s", err, out)
+	}
+	if len(decoded.Messages) != 1 || len(decoded.Messages[0].Content) != 1 {
+		t.Fatalf("content = %#v, want one replacement block", decoded.Messages)
+	}
+	block := decoded.Messages[0].Content[0]
+	if block.Type != "text" || block.Text != "[image omitted]" {
+		t.Errorf("block = %+v, want the text marker", block)
+	}
+}
+
+func TestRewriteForward_ReplacesImageInsideToolResult(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"ok"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}]}`
+	out, counts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.images != 1 {
+		t.Fatalf("counts = %+v, want 1 image", counts)
+	}
+	s := string(out)
+	for _, want := range []string{`"tool_use_id":"t1"`, `"text":"ok"`, `[image omitted]`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q: %s", want, s)
+		}
+	}
+	if strings.Contains(s, "aGk=") {
+		t.Errorf("image payload survived: %s", s)
+	}
+}
+
+func TestRewriteForward_DocumentFollowsKeepDocuments(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"cGRm"}},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, counts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true, replaceDocuments: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.images != 1 || counts.documents != 1 {
+		t.Fatalf("counts = %+v, want 1 image and 1 document", counts)
+	}
+	s := string(out)
+	if !strings.Contains(s, "[image omitted]") || !strings.Contains(s, "[document omitted]") {
+		t.Errorf("markers missing: %s", s)
+	}
+	if strings.Contains(s, "aGk=") || strings.Contains(s, "cGRm") {
+		t.Errorf("media payload survived: %s", s)
+	}
+
+	kept, keepCounts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keepCounts.images != 1 || keepCounts.documents != 0 {
+		t.Fatalf("keep_documents counts = %+v, want 1 image and 0 documents", keepCounts)
+	}
+	keptStr := string(kept)
+	if !strings.Contains(keptStr, `"type":"document"`) || !strings.Contains(keptStr, "cGRm") {
+		t.Errorf("document was not kept: %s", keptStr)
+	}
+	if strings.Contains(keptStr, "[document omitted]") {
+		t.Errorf("document marker appeared despite keep_documents: %s", keptStr)
+	}
+}
+
+func TestRewriteForward_CarriesCacheControlToMarker(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"image","cache_control":{"type":"ephemeral"},"source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, _, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"text","text":"[image omitted]","cache_control":{"type":"ephemeral"}}`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("cache_control not carried to the marker: %s", out)
+	}
+}
+
+func TestRewriteForward_LeavesUnaffectedMessagesByteIdentical(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"assistant","content":[{"type":"text","text":"keep"}],"extra":123},{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, _, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"role":"assistant","content":[{"type":"text","text":"keep"}],"extra":123}`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("unaffected message bytes changed: %s", out)
+	}
+}
+
+func TestRewriteForward_WebSearchAndMediaTogether(t *testing.T) {
+	in := `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, counts, err := RewriteForward([]byte(in), "UP", true, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.images != 1 {
+		t.Fatalf("counts = %+v, want 1 image", counts)
+	}
+	s := string(out)
+	if !strings.Contains(s, webSearchHeaderBlock) {
+		t.Errorf("web search block missing: %s", s)
+	}
+	if !strings.Contains(s, "[image omitted]") {
+		t.Errorf("image marker missing: %s", s)
+	}
+}
+
+func TestRewriteForward_DoesNotDescendIntoNestedToolResult(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"outer","content":[{"type":"tool_result","tool_use_id":"inner","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}]}]}`
+	out, counts, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !counts.empty() {
+		t.Fatalf("counts = %+v, want no replacements below the first tool_result level", counts)
+	}
+	if strings.Contains(string(out), "[image omitted]") {
+		t.Errorf("nested tool_result image was replaced: %s", out)
+	}
+}
+
+func TestRewriteForward_DropsNullCacheControl(t *testing.T) {
+	in := `{"model":"claude-glm-5.3","messages":[{"role":"user","content":[{"type":"image","cache_control":null,"source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, _, err := RewriteForward([]byte(in), "glm-5.3", false, mediaPolicy{replaceImages: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"text","text":"[image omitted]"}`
+	if !strings.Contains(string(out), want) {
+		t.Errorf("marker missing: %s", out)
+	}
+	if strings.Contains(string(out), "cache_control") {
+		t.Errorf("null cache_control leaked into the marker: %s", out)
+	}
+}
+
+func TestRewriteModel_DoesNotTouchMedia(t *testing.T) {
+	in := `{"model":"old","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	out, err := RewriteModel([]byte(in), "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, `"type":"image"`) || !strings.Contains(s, "aGk=") {
+		t.Errorf("RewriteModel changed media: %s", s)
+	}
+	if !strings.Contains(s, `"model":"new"`) {
+		t.Errorf("model not rewritten: %s", s)
 	}
 }

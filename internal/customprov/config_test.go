@@ -996,3 +996,144 @@ func TestDefaultPathFor_Symlink(t *testing.T) {
 		t.Errorf("defaultPathFor(symlink) = %q, want %q", got, want)
 	}
 }
+
+// TestLoadTextOnly covers the text_only model flag and its document
+// companion on both protocols.
+func TestLoadTextOnly(t *testing.T) {
+	tests := []struct {
+		name         string
+		provider     string
+		wantTextOnly bool
+		wantKeepDocs bool
+	}{
+		{
+			name:         "anthropic text_only",
+			provider:     `{"base_url":"http://p","auth_token":"t","models":[{"id":"m","text_only":true}]}`,
+			wantTextOnly: true,
+		},
+		{
+			name:         "anthropic text_only with keep_documents",
+			provider:     `{"base_url":"http://p","auth_token":"t","models":[{"id":"m","text_only":true,"keep_documents":true}]}`,
+			wantTextOnly: true,
+			wantKeepDocs: true,
+		},
+		{
+			name:         "openai text_only",
+			provider:     `{"base_url":"http://p","auth_token":"t","protocol":"openai","models":[{"id":"m","text_only":true}]}`,
+			wantTextOnly: true,
+		},
+		{
+			name:     "object form without the fields defaults to false",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"m"}]}`,
+		},
+		{
+			name:     "string shorthand stays false",
+			provider: `{"base_url":"http://p","auth_token":"t","models":["m"]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg, err := loadTestRegistry(t, `{"providers": {"p": `+tt.provider+`}}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := reg.providers[0].Models[0]
+			if m.TextOnly != tt.wantTextOnly || m.KeepDocuments != tt.wantKeepDocs {
+				t.Errorf("Models[0] = {TextOnly:%v KeepDocuments:%v}, want {%v %v}",
+					m.TextOnly, m.KeepDocuments, tt.wantTextOnly, tt.wantKeepDocs)
+			}
+		})
+	}
+}
+
+// TestLoadKeepDocumentsValidation pins the presence-based constraints: the
+// field is rejected without text_only and on openai-protocol providers,
+// including an explicit false, because its presence cannot be honored.
+func TestLoadKeepDocumentsValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		wantErrs []string
+	}{
+		{
+			name:     "requires text_only",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"m","keep_documents":true}]}`,
+			wantErrs: []string{"providers.p.models[0].keep_documents", "requires text_only"},
+		},
+		{
+			name:     "explicit false still requires text_only",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"m","keep_documents":false}]}`,
+			wantErrs: []string{"requires text_only"},
+		},
+		{
+			name:     "openai protocol rejects keep_documents",
+			provider: `{"base_url":"http://p","auth_token":"t","protocol":"openai","models":[{"id":"m","text_only":true,"keep_documents":true}]}`,
+			wantErrs: []string{"only anthropic-protocol models support it"},
+		},
+		{
+			name:     "misspelled field is an unknown member",
+			provider: `{"base_url":"http://p","auth_token":"t","models":[{"id":"m","text_only":true,"keep_document":true}]}`,
+			wantErrs: []string{"keep_document"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadTestRegistry(t, `{"providers": {"p": `+tt.provider+`}}`)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			for _, want := range tt.wantErrs {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+
+	// The valid combination still loads and carries both flags.
+	reg, err := loadTestRegistry(t, `{"providers": {"p": {
+		"base_url": "http://p", "auth_token": "t",
+		"models": [{"id": "m", "text_only": true, "keep_documents": true}]
+	}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := reg.providers[0].Models[0]
+	if !m.TextOnly || !m.KeepDocuments {
+		t.Errorf("Models[0] = {TextOnly:%v KeepDocuments:%v}, want true/true", m.TextOnly, m.KeepDocuments)
+	}
+}
+
+// TestLookupCarriesTextOnly asserts both lookup paths hand the new flags to
+// the Hit: Lookup (display-name match) and lookupModel (mapping target).
+func TestLookupCarriesTextOnly(t *testing.T) {
+	reg, err := loadTestRegistry(t, `{"providers": {"p": {
+		"base_url": "http://p", "auth_token": "t",
+		"models": [{"id": "m", "text_only": true, "keep_documents": true}, {"id": "n"}]
+	}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hit, ok := reg.Lookup("claude-m")
+	if !ok {
+		t.Fatal("Lookup missed")
+	}
+	if !hit.TextOnly || !hit.KeepDocuments {
+		t.Errorf("hit = {TextOnly:%v KeepDocuments:%v}, want true/true", hit.TextOnly, hit.KeepDocuments)
+	}
+	hit, ok = reg.Lookup("claude-n")
+	if !ok {
+		t.Fatal("Lookup missed")
+	}
+	if hit.TextOnly || hit.KeepDocuments {
+		t.Errorf("plain model hit = {TextOnly:%v KeepDocuments:%v}, want false/false", hit.TextOnly, hit.KeepDocuments)
+	}
+	hit, ok = reg.lookupModel("p", "m")
+	if !ok {
+		t.Fatal("lookupModel missed")
+	}
+	if !hit.TextOnly || !hit.KeepDocuments {
+		t.Errorf("mapping target hit = {TextOnly:%v KeepDocuments:%v}, want true/true", hit.TextOnly, hit.KeepDocuments)
+	}
+}

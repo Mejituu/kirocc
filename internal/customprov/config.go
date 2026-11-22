@@ -134,6 +134,17 @@ type modelSpec struct {
 	// WebSearch turns on the provider's native web search for this model;
 	// allowed on both protocols.
 	WebSearch bool `json:"web_search,omitempty"`
+
+	// TextOnly declares a model with no image input: image blocks are
+	// replaced with a text marker before forwarding. Document blocks follow
+	// unless KeepDocuments is set.
+	TextOnly bool `json:"text_only,omitempty"`
+
+	// KeepDocuments keeps document blocks when TextOnly is set. Anthropic
+	// protocol only: the OpenAI conversion cannot carry documents. A pointer
+	// distinguishes an omitted field from an explicit false, so the startup
+	// validation can reject the field's presence where it has no meaning.
+	KeepDocuments *bool `json:"keep_documents,omitempty"`
 }
 
 // mappingRule is one entry of a mappings group.
@@ -304,6 +315,14 @@ func buildRegistry(path string, fc fileConfig) (*Registry, error) {
 			if m.AlwaysThinking && protocol != ProtocolOpenAI {
 				return nil, fmt.Errorf("%s: providers.%s.models[%d].always_thinking: only OpenAI-protocol models support it (some reject enable_thinking:false)", path, name, i)
 			}
+			if entry.Spec != nil && entry.Spec.KeepDocuments != nil {
+				if !m.TextOnly {
+					return nil, fmt.Errorf("%s: providers.%s.models[%d].keep_documents: requires text_only", path, name, i)
+				}
+				if protocol != ProtocolAnthropic {
+					return nil, fmt.Errorf("%s: providers.%s.models[%d].keep_documents: only anthropic-protocol models support it (OpenAI Chat cannot carry documents)", path, name, i)
+				}
+			}
 			if seenIDs[m.ID] {
 				return nil, fmt.Errorf("%s: providers.%s.models[%d].id: %q is declared twice in this provider", path, name, i, m.ID)
 			}
@@ -399,7 +418,8 @@ func buildModel(path, providerName string, i int, entry modelEntry) (Model, erro
 		if display == "" {
 			display = s.ID
 		}
-		return Model{ID: s.ID, Display: display, Context1M: s.Context1M, Label: s.Label, AlwaysThinking: s.AlwaysThinking, WebSearch: s.WebSearch}, nil
+		keepDocuments := s.KeepDocuments != nil && *s.KeepDocuments
+		return Model{ID: s.ID, Display: display, Context1M: s.Context1M, Label: s.Label, AlwaysThinking: s.AlwaysThinking, WebSearch: s.WebSearch, TextOnly: s.TextOnly, KeepDocuments: keepDocuments}, nil
 	}
 	if entry.String == "" {
 		return Model{}, fmt.Errorf("%s: providers.%s.models[%d].id must not be empty", path, providerName, i)

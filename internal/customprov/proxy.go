@@ -178,11 +178,22 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 	if ws {
 		slog.InfoContext(ctx, "web search enabled", "trace_id", short, "provider", hit.Provider.Name, "mode", "native")
 	}
-	body, err := RewriteForward(raw, hit.BaseModel, ws)
+	media := mediaPolicy{
+		replaceImages:    hit.TextOnly,
+		replaceDocuments: hit.TextOnly && !hit.KeepDocuments,
+	}
+	reason := ""
+	if hit.TextOnly {
+		reason = "declared"
+	}
+	body, replaced, err := RewriteForward(raw, hit.BaseModel, ws, media)
 	if err != nil {
 		slog.ErrorContext(ctx, "custom provider request rewrite failed", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest, "invalid request: "+err.Error())
 		return
+	}
+	if !replaced.empty() {
+		logMediaReplaced(ctx, short, hit, replaced, reason)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hit.Provider.BaseURL+string(endpoint), bytes.NewReader(body))
@@ -307,6 +318,14 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode, "body", string(errBody))
 		slog.WarnContext(ctx, "custom provider error", args...)
 	}
+}
+
+// logMediaReplaced records one request's proactive media replacement.
+func logMediaReplaced(ctx context.Context, short string, hit Hit, counts mediaCounts, reason string) {
+	args := appendSessionID(ctx, []any{"trace_id", short})
+	args = append(args, "provider", hit.Provider.Name, "model", hit.BaseModel,
+		"images", counts.images, "documents", counts.documents, "reason", reason)
+	slog.InfoContext(ctx, "custom provider media replaced", args...)
 }
 
 // writeCompletionLog emits the "<-- POST /v1/messages" line both protocol

@@ -29,6 +29,15 @@ type Model struct {
 	// tool natively — the anthropic protocol forwards the declaration with a
 	// fixed billing-header block, the openai protocol sets enable_search.
 	WebSearch bool
+
+	// TextOnly marks a model with no image input: image blocks are replaced
+	// with a text marker before forwarding. Documents follow unless
+	// KeepDocuments is set.
+	TextOnly bool
+
+	// KeepDocuments keeps document blocks when TextOnly is set; valid only on
+	// the anthropic protocol.
+	KeepDocuments bool
 }
 
 // trimOneMSuffix strips a trailing [1m] context marker, case-insensitively —
@@ -75,6 +84,14 @@ type Hit struct {
 	// WebSearch reports a model declared with web_search, so its requests
 	// activate the provider's native search.
 	WebSearch bool
+
+	// TextOnly reports a model declared with text_only, so its requests get
+	// image blocks replaced before forwarding.
+	TextOnly bool
+
+	// KeepDocuments reports a text_only model declared with keep_documents,
+	// so its document blocks are left in place.
+	KeepDocuments bool
 }
 
 // modelMatch is the registry entry a display name resolves to: the provider
@@ -115,7 +132,7 @@ func (r *Registry) Lookup(model string) (Hit, bool) {
 	if !ok {
 		return Hit{}, false
 	}
-	return Hit{Provider: m.provider, BaseModel: m.model.ID, Config1M: m.model.Context1M, AlwaysThinking: m.model.AlwaysThinking, WebSearch: m.model.WebSearch}, true
+	return Hit{Provider: m.provider, BaseModel: m.model.ID, Config1M: m.model.Context1M, AlwaysThinking: m.model.AlwaysThinking, WebSearch: m.model.WebSearch, TextOnly: m.model.TextOnly, KeepDocuments: m.model.KeepDocuments}, true
 }
 
 // lookupModel resolves a mapping target: the model with exactly this id in
@@ -131,7 +148,7 @@ func (r *Registry) lookupModel(providerName, id string) (Hit, bool) {
 	}
 	for _, m := range p.Models {
 		if m.ID == id {
-			return Hit{Provider: p, BaseModel: m.ID, Config1M: m.Context1M, AlwaysThinking: m.AlwaysThinking, WebSearch: m.WebSearch}, true
+			return Hit{Provider: p, BaseModel: m.ID, Config1M: m.Context1M, AlwaysThinking: m.AlwaysThinking, WebSearch: m.WebSearch, TextOnly: m.TextOnly, KeepDocuments: m.KeepDocuments}, true
 		}
 	}
 	return Hit{}, false
