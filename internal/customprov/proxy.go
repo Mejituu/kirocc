@@ -69,6 +69,9 @@ type Proxy struct {
 	// sessions tracks which provider each Claude Code session last used, for
 	// the session-following mappings.
 	sessions *sessionTable
+	// media records provider+model pairs learned to reject media after a
+	// successful stripped retry.
+	media *mediaMemory
 }
 
 // NewProxy builds the forwarding client. responseHeaderTimeout bounds the
@@ -78,7 +81,7 @@ type Proxy struct {
 func NewProxy(reg *Registry, responseHeaderTimeout time.Duration) *Proxy {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
-	return &Proxy{registry: reg, client: &http.Client{Transport: transport}, sessions: newSessionTable(sessionTableCapacity)}
+	return &Proxy{registry: reg, client: &http.Client{Transport: transport}, sessions: newSessionTable(sessionTableCapacity), media: newMediaMemory()}
 }
 
 // Lookup reports whether a requested model ID maps to a custom provider.
@@ -178,13 +181,18 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 	if ws {
 		slog.InfoContext(ctx, "web search enabled", "trace_id", short, "provider", hit.Provider.Name, "mode", "native")
 	}
+	declared := hit.TextOnly
+	hit.TextOnly = declared || p.media.has(hit.Provider.Name, hit.BaseModel)
+	reason := ""
+	switch {
+	case declared:
+		reason = "declared"
+	case hit.TextOnly:
+		reason = "learned"
+	}
 	media := mediaPolicy{
 		replaceImages:    hit.TextOnly,
 		replaceDocuments: hit.TextOnly && !hit.KeepDocuments,
-	}
-	reason := ""
-	if hit.TextOnly {
-		reason = "declared"
 	}
 	body, replaced, err := RewriteForward(raw, hit.BaseModel, ws, media)
 	if err != nil {
@@ -196,14 +204,21 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		logMediaReplaced(ctx, short, hit, replaced, reason)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hit.Provider.BaseURL+string(endpoint), bytes.NewReader(body))
+	buildRequest := func(body []byte) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, hit.Provider.BaseURL+string(endpoint), bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		copyForwardHeaders(req.Header, h)
+		req.Header.Set("Authorization", "Bearer "+hit.Provider.authToken)
+		return req, nil
+	}
+	req, err := buildRequest(body)
 	if err != nil {
 		slog.ErrorContext(ctx, "custom provider request build failed", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadGateway, httpx.ErrTypeAPI, fmt.Sprintf("custom provider %q request could not be built", hit.Provider.Name))
 		return
 	}
-	copyForwardHeaders(req.Header, h)
-	req.Header.Set("Authorization", "Bearer "+hit.Provider.authToken)
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		slog.DebugContext(ctx, "custom provider request headers",
 			"trace_id", short, "headers", logging.SafeHeaders{H: req.Header})
@@ -224,12 +239,62 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 	}
 	defer resp.Body.Close()
 
-	for key, values := range resp.Header {
-		if hopByHopHeaders[key] || key == "Set-Cookie" {
-			continue
+	// A first attempt that was not already stripped may be rejected because
+	// the upstream rejects media. Rebuild once with media forced off, but only
+	// buffer/classify the error after confirming the request actually has
+	// replaceable media; no-media requests keep the existing streaming path.
+	if !hit.TextOnly && isUnsupportedMediaStatus(resp.StatusCode) {
+		// keep_documents is impossible here: it requires text_only, and a
+		// text_only model never enters the passive retry.
+		forced := mediaPolicy{replaceImages: true, replaceDocuments: true}
+		forcedBody, forcedCounts, forcedErr := RewriteForward(raw, hit.BaseModel, ws, forced)
+		if forcedErr == nil && !forcedCounts.empty() && !bytes.Equal(forcedBody, body) {
+			firstBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				slog.ErrorContext(ctx, "custom provider response read failed",
+					"trace_id", short, "provider", hit.Provider.Name, "err", readErr)
+			}
+			if readErr != nil || !isUnsupportedMediaError(resp.StatusCode, firstBody) {
+				writeBufferedProviderError(ctx, w, resp, firstBody, short, hit, logPair, timer, traceID, readErr != nil, true)
+				return
+			}
+			logProviderError(ctx, short, hit, resp.StatusCode, firstBody)
+			_ = resp.Body.Close()
+
+			retryReq, retryBuildErr := buildRequest(forcedBody)
+			retried := false
+			if retryBuildErr == nil {
+				retryResp, retryErr := p.client.Do(retryReq)
+				switch {
+				case retryErr != nil && ctx.Err() != nil:
+					return
+				case retryErr == nil && retryResp.StatusCode >= 200 && retryResp.StatusCode <= 299:
+					p.media.learn(hit.Provider.Name, hit.BaseModel)
+					logMediaLearned(ctx, short, hit)
+					logMediaReplaced(ctx, short, hit, forcedCounts, "retry")
+					resp = retryResp
+					defer retryResp.Body.Close()
+					retried = true
+				default:
+					if retryResp != nil {
+						_ = retryResp.Body.Close()
+					}
+					if retryErr != nil {
+						slog.ErrorContext(ctx, "custom provider unreachable",
+							"trace_id", short, "provider", hit.Provider.Name, "err", retryErr)
+					}
+				}
+			} else {
+				slog.ErrorContext(ctx, "custom provider request build failed", "trace_id", short, "err", retryBuildErr)
+			}
+			if !retried {
+				writeBufferedProviderError(ctx, w, resp, firstBody, short, hit, logPair, timer, traceID, false, false)
+				return
+			}
 		}
-		w.Header()[key] = append([]string(nil), values...)
 	}
+
+	copyResponseHeaders(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if logPair {
 		slog.DebugContext(ctx, "client response headers",
@@ -314,9 +379,7 @@ func (p *Proxy) Forward(ctx context.Context, w http.ResponseWriter, h http.Heade
 		writeCompletionLog(ctx, short, hit, resp.StatusCode, usage, timer, scanner != nil)
 	}
 	if errBody != nil {
-		args := appendSessionID(ctx, []any{"trace_id", short})
-		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode, "body", string(errBody))
-		slog.WarnContext(ctx, "custom provider error", args...)
+		logProviderError(ctx, short, hit, resp.StatusCode, errBody)
 	}
 }
 
@@ -326,6 +389,62 @@ func logMediaReplaced(ctx context.Context, short string, hit Hit, counts mediaCo
 	args = append(args, "provider", hit.Provider.Name, "model", hit.BaseModel,
 		"images", counts.images, "documents", counts.documents, "reason", reason)
 	slog.InfoContext(ctx, "custom provider media replaced", args...)
+}
+
+// logMediaLearned records a provider+model pair the retry proved text-only.
+func logMediaLearned(ctx context.Context, short string, hit Hit) {
+	args := appendSessionID(ctx, []any{"trace_id", short})
+	args = append(args, "provider", hit.Provider.Name, "model", hit.BaseModel)
+	slog.InfoContext(ctx, "custom provider media capability learned", args...)
+}
+
+// copyResponseHeaders copies the provider response headers while dropping
+// hop-by-hop headers and cookies, like the streaming path.
+func copyResponseHeaders(w http.ResponseWriter, header http.Header) {
+	for key, values := range header {
+		if hopByHopHeaders[key] || key == "Set-Cookie" {
+			continue
+		}
+		w.Header()[key] = append([]string(nil), values...)
+	}
+}
+
+// logProviderError emits the existing custom-provider error warning with a
+// body capture bounded to errBodyLimit.
+func logProviderError(ctx context.Context, short string, hit Hit, status int, body []byte) {
+	logged := body
+	if len(logged) > errBodyLimit {
+		logged = logged[:errBodyLimit]
+	}
+	args := appendSessionID(ctx, []any{"trace_id", short})
+	args = append(args, "provider", hit.Provider.Name, "status", status, "body", string(logged))
+	slog.WarnContext(ctx, "custom provider error", args...)
+}
+
+// writeBufferedProviderError replays an upstream error response whose body
+// has already been read: the same filtered headers, status, and bytes the
+// streaming path would send, plus its completion and warning logs.
+func writeBufferedProviderError(ctx context.Context, w http.ResponseWriter, resp *http.Response, body []byte, short string, hit Hit, logPair bool, timer *timing.Request, traceID string, readFailed, logWarning bool) {
+	copyResponseHeaders(w, resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	if logPair {
+		slog.DebugContext(ctx, "client response headers",
+			"trace_id", traceID,
+			"session_id", logging.SessionIDFromContext(ctx),
+			"headers", logging.SafeHeaders{H: w.Header()},
+		)
+	}
+	if len(body) > 0 {
+		if _, err := w.Write(body); err != nil {
+			return
+		}
+	}
+	if logPair && !readFailed {
+		writeCompletionLog(ctx, short, hit, resp.StatusCode, nil, timer, false)
+	}
+	if logWarning {
+		logProviderError(ctx, short, hit, resp.StatusCode, body)
+	}
 }
 
 // writeCompletionLog emits the "<-- POST /v1/messages" line both protocol

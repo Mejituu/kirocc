@@ -24,6 +24,15 @@ import (
 // protocol, so the request carries only that protocol's own headers.
 func (p *Proxy) forwardOpenAI(ctx context.Context, w http.ResponseWriter, h http.Header, raw []byte, hit Hit, info RequestInfo, endpoint Endpoint) {
 	_, short := logging.TraceIDs(ctx)
+	declared := hit.TextOnly
+	hit.TextOnly = declared || p.media.has(hit.Provider.Name, hit.BaseModel)
+	mediaReason := ""
+	switch {
+	case declared:
+		mediaReason = "declared"
+	case hit.TextOnly:
+		mediaReason = "learned"
+	}
 	// Same timer arrangement as Forward: maybeForwardCustom put the timer in
 	// ctx; forwardOpenAI is also called directly in tests, hence the fallback.
 	timer := timing.From(ctx)
@@ -65,12 +74,8 @@ func (p *Proxy) forwardOpenAI(ctx context.Context, w http.ResponseWriter, h http
 		httpx.WriteError(w, http.StatusBadRequest, httpx.ErrTypeInvalidRequest, "invalid request: "+err.Error())
 		return
 	}
-	reason := ""
-	if hit.TextOnly {
-		reason = "declared"
-	}
 	if counts.images > 0 {
-		logMediaReplaced(ctx, short, hit, counts, reason)
+		logMediaReplaced(ctx, short, hit, counts, mediaReason)
 	}
 	// One warning per request, whatever the count: the conversion replaced
 	// document blocks (PDF and the like) the Chat protocol cannot carry. The
@@ -99,18 +104,25 @@ func (p *Proxy) forwardOpenAI(ctx context.Context, w http.ResponseWriter, h http
 		slog.DebugContext(ctx, "custom provider request body", "trace_id", short, "request_body", jsontext.Value(body))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hit.Provider.BaseURL+"/chat/completions", bytes.NewReader(body))
+	buildRequest := func(body []byte) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, hit.Provider.BaseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		if info.Stream {
+			req.Header.Set("Accept", "text/event-stream")
+		}
+		req.Header.Set("Authorization", "Bearer "+hit.Provider.authToken)
+		return req, nil
+	}
+	req, err := buildRequest(body)
 	if err != nil {
 		slog.ErrorContext(ctx, "custom provider request build failed", "trace_id", short, "err", err)
 		httpx.WriteError(w, http.StatusBadGateway, httpx.ErrTypeAPI, fmt.Sprintf("custom provider %q request could not be built", hit.Provider.Name))
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	if info.Stream {
-		req.Header.Set("Accept", "text/event-stream")
-	}
-	req.Header.Set("Authorization", "Bearer "+hit.Provider.authToken)
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		slog.DebugContext(ctx, "custom provider request headers",
 			"trace_id", short, "headers", logging.SafeHeaders{H: req.Header})
@@ -138,24 +150,79 @@ func (p *Proxy) forwardOpenAI(ctx context.Context, w http.ResponseWriter, h http
 		if readErr != nil {
 			slog.ErrorContext(ctx, "custom provider response read failed",
 				"trace_id", short, "provider", hit.Provider.Name, "err", readErr)
-		} else if logPair {
-			writeCompletionLog(ctx, short, hit, resp.StatusCode, nil, timer, false)
 		}
 		logged := fullBody
 		if len(logged) > errBodyLimit {
 			logged = logged[:errBodyLimit]
 		}
-		args := appendSessionID(ctx, []any{"trace_id", short})
-		args = append(args, "provider", hit.Provider.Name, "status", resp.StatusCode, "body", string(logged))
-		slog.WarnContext(ctx, "custom provider error", args...)
-		// Retry-After is the one upstream error header worth passing on: a
-		// rate-limited client backs off correctly instead of guessing. It
-		// must be set before WriteError, which writes the header block.
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			w.Header().Set("Retry-After", ra)
+		firstStatus := resp.StatusCode
+		logFirstError := func() {
+			args := appendSessionID(ctx, []any{"trace_id", short})
+			args = append(args, "provider", hit.Provider.Name, "status", firstStatus, "body", string(logged))
+			slog.WarnContext(ctx, "custom provider error", args...)
 		}
-		httpx.WriteError(w, resp.StatusCode, oaiErrorType(resp.StatusCode), openAIErrorMessage(fullBody))
-		return
+
+		// A request that was not already stripped may have been rejected
+		// because the upstream rejects media. Rebuild once with media forced
+		// off; only a body that actually changed is worth sending.
+		retried := false
+		if readErr == nil && !hit.TextOnly && isUnsupportedMediaStatus(resp.StatusCode) &&
+			isUnsupportedMediaError(resp.StatusCode, fullBody) {
+			retryHit := hit
+			retryHit.TextOnly = true
+			retryReq, retryCounts, buildErr := buildOpenAIRequest(raw, retryHit, info)
+			if buildErr == nil && !retryCounts.empty() {
+				retryBody, marshalErr := json.Marshal(retryReq)
+				if marshalErr == nil && !bytes.Equal(retryBody, body) {
+					retryHTTPReq, reqErr := buildRequest(retryBody)
+					if reqErr == nil {
+						_ = resp.Body.Close()
+						retryResp, retryErr := p.client.Do(retryHTTPReq)
+						switch {
+						case retryErr != nil && ctx.Err() != nil:
+							return
+						case retryErr == nil && retryResp != nil && retryResp.StatusCode >= 200 && retryResp.StatusCode <= 299:
+							logFirstError()
+							p.media.learn(hit.Provider.Name, hit.BaseModel)
+							logMediaLearned(ctx, short, hit)
+							logMediaReplaced(ctx, short, hit, retryCounts, "retry")
+							resp = retryResp
+							defer retryResp.Body.Close()
+							retried = true
+						default:
+							if retryResp != nil {
+								_ = retryResp.Body.Close()
+							}
+							if retryErr != nil {
+								slog.ErrorContext(ctx, "custom provider unreachable",
+									"trace_id", short, "provider", hit.Provider.Name, "err", retryErr)
+							}
+						}
+					} else {
+						slog.ErrorContext(ctx, "custom provider request build failed", "trace_id", short, "err", reqErr)
+					}
+				} else if marshalErr != nil {
+					slog.ErrorContext(ctx, "custom provider request conversion failed", "trace_id", short, "err", marshalErr)
+				}
+			}
+		}
+		if !retried {
+			if logPair && readErr == nil {
+				writeCompletionLog(ctx, short, hit, resp.StatusCode, nil, timer, false)
+			}
+			logFirstError()
+			// Retry-After is the one upstream error header worth passing on: a
+			// rate-limited client backs off correctly instead of guessing. It
+			// must be set before WriteError, which writes the header block, and
+			// only when the first response is the one returned.
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				w.Header().Set("Retry-After", ra)
+			}
+			httpx.WriteError(w, resp.StatusCode, oaiErrorType(resp.StatusCode), openAIErrorMessage(fullBody))
+			return
+		}
+		// Retry succeeded: fall through to the success handling with resp set
+		// to the retry response.
 	}
 
 	if !info.Stream {
