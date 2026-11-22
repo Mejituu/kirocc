@@ -86,6 +86,10 @@ type Proxy struct {
 // run for minutes.
 func NewProxy(reg *Registry, responseHeaderTimeout time.Duration) *Proxy {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Custom providers run at higher concurrency than Kiro, and two providers
+	// on the same host share this pool.
+	transport.MaxIdleConnsPerHost = 64
+	transport.MaxIdleConns = 128
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	p := &Proxy{client: &http.Client{Transport: transport}, sessions: newSessionTable(sessionTableCapacity), media: newMediaMemory()}
 	if reg != nil {

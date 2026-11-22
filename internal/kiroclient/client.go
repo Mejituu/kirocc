@@ -154,7 +154,8 @@ func WithOTel(bodyLimit int) HTTPClientOption {
 func NewHTTPClient(opts ...HTTPClientOption) *HTTPClient {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 100
-	transport.MaxIdleConnsPerHost = 10
+	// Sized for the Kiro upstream's expected concurrency (~20 in flight).
+	transport.MaxIdleConnsPerHost = 16
 	transport.IdleConnTimeout = 90 * time.Second
 
 	c := &HTTPClient{headerTimeout: DefaultResponseHeaderTimeout}
