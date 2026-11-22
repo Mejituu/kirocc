@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/d-kuro/kirocc/internal/models"
@@ -220,7 +221,9 @@ func loadFile(path string) (*Registry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+	// Windows synthesizes permission bits from the read-only attribute, so the
+	// group/other-readable check cannot be satisfied there by chmod.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm&0o077 != 0 {
 		slog.Warn("custom provider config is readable by group or others; run chmod 600",
 			"path", path, "mode", perm.String())
 	}
@@ -241,6 +244,10 @@ func loadFile(path string) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// info was taken before ReadFile: a change made during or after the read
+	// must show up as a difference on the watcher's next poll. A post-read
+	// state could hide exactly that change.
+	registry.loaded = info
 	for _, p := range registry.providers {
 		slog.Info("custom provider loaded",
 			"name", p.Name,
@@ -259,7 +266,7 @@ func loadFile(path string) (*Registry, error) {
 // Errors are prefixed with the file path and locate the offending entry in
 // the new structure's terms (providers.<name>.models[i].id, …).
 func buildRegistry(path string, fc fileConfig) (*Registry, error) {
-	registry := &Registry{byDisplay: make(map[string]modelMatch)}
+	registry := &Registry{path: path, byDisplay: make(map[string]modelMatch)}
 	// Display names must be unique across providers, so a match is
 	// unambiguous.
 	seenDisplays := make(map[string]string)

@@ -1,6 +1,7 @@
 package customprov
 
 import (
+	"os"
 	"strings"
 
 	"github.com/d-kuro/kirocc/internal/models"
@@ -103,6 +104,13 @@ type modelMatch struct {
 
 // Registry indexes the configured models for request matching.
 type Registry struct {
+	// path is the config file this registry was loaded from. It is empty for a
+	// registry built directly in tests.
+	path string
+	// loaded is the file state observed before the file was read. The watcher
+	// starts from it, so a change made while the initial load runs is noticed
+	// on the next poll instead of being adopted as the baseline.
+	loaded os.FileInfo
 	// providers keeps the file's declaration order, which /v1/models and
 	// the load log follow.
 	providers []*Provider

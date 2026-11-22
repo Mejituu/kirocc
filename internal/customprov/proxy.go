@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/d-kuro/kirocc/internal/anthropic"
@@ -64,8 +65,13 @@ func (info RequestInfo) HasWebSearch() bool {
 // shares none of the Kiro pipeline: no model resolution, no payload
 // conversion, no usage recording.
 type Proxy struct {
-	registry *Registry
-	client   *http.Client
+	// registry is replaced atomically when the config is reloaded; in-flight
+	// requests keep the Hit they already resolved.
+	registry atomic.Pointer[Registry]
+	// configPath is the file the registry was loaded from; empty when custom
+	// providers are disabled or the registry was built without a file.
+	configPath string
+	client     *http.Client
 	// sessions tracks which provider each Claude Code session last used, for
 	// the session-following mappings.
 	sessions *sessionTable
@@ -81,18 +87,23 @@ type Proxy struct {
 func NewProxy(reg *Registry, responseHeaderTimeout time.Duration) *Proxy {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
-	return &Proxy{registry: reg, client: &http.Client{Transport: transport}, sessions: newSessionTable(sessionTableCapacity), media: newMediaMemory()}
+	p := &Proxy{client: &http.Client{Transport: transport}, sessions: newSessionTable(sessionTableCapacity), media: newMediaMemory()}
+	if reg != nil {
+		p.registry.Store(reg)
+		p.configPath = reg.path
+	}
+	return p
 }
 
 // Lookup reports whether a requested model ID maps to a custom provider.
 func (p *Proxy) Lookup(model string) (Hit, bool) {
-	return p.registry.Lookup(model)
+	return p.registry.Load().Lookup(model)
 }
 
 // LookupModel resolves a mapping target: the model with exactly this id in
 // the named provider.
 func (p *Proxy) LookupModel(providerName, id string) (Hit, bool) {
-	return p.registry.lookupModel(providerName, id)
+	return p.registry.Load().lookupModel(providerName, id)
 }
 
 // WebSearchFallbackHit resolves the fallback target for a request whose
@@ -100,22 +111,30 @@ func (p *Proxy) LookupModel(providerName, id string) (Hit, bool) {
 // Hit (WebSearch true, guaranteed by startup validation), or false when
 // the provider declares no fallback.
 func (p *Proxy) WebSearchFallbackHit(providerName string) (Hit, bool) {
-	if p == nil || p.registry == nil {
+	if p == nil {
 		return Hit{}, false
 	}
-	prov := p.registry.providerByName(providerName)
+	reg := p.registry.Load()
+	if reg == nil {
+		return Hit{}, false
+	}
+	prov := reg.providerByName(providerName)
 	if prov == nil || prov.WebSearchFallback == nil {
 		return Hit{}, false
 	}
-	return p.LookupModel(prov.WebSearchFallback.Provider, prov.WebSearchFallback.Model)
+	return reg.lookupModel(prov.WebSearchFallback.Provider, prov.WebSearchFallback.Model)
 }
 
 // KiroWebSearchFallbackHit resolves the kiro-section fallback the same way.
 func (p *Proxy) KiroWebSearchFallbackHit() (Hit, bool) {
-	if p == nil || p.registry == nil || p.registry.KiroWebSearchFallback == nil {
+	if p == nil {
 		return Hit{}, false
 	}
-	return p.LookupModel(p.registry.KiroWebSearchFallback.Provider, p.registry.KiroWebSearchFallback.Model)
+	reg := p.registry.Load()
+	if reg == nil || reg.KiroWebSearchFallback == nil {
+		return Hit{}, false
+	}
+	return reg.lookupModel(reg.KiroWebSearchFallback.Provider, reg.KiroWebSearchFallback.Model)
 }
 
 // MatchMapping resolves the session-following mapping for a request: the
@@ -127,7 +146,7 @@ func (p *Proxy) MatchMapping(sessionID string, info RequestInfo) (sessionProvide
 	if !ok {
 		return "", Mapping{}, false
 	}
-	m, matched := p.registry.matchMapping(provider, info)
+	m, matched := p.registry.Load().matchMapping(provider, info)
 	if !matched {
 		return "", Mapping{}, false
 	}
@@ -142,7 +161,7 @@ func (p *Proxy) RecordSession(sessionID, provider string) {
 
 // ListModels returns the custom models for /v1/models.
 func (p *Proxy) ListModels() []ModelInfo {
-	return p.registry.ListModels()
+	return p.registry.Load().ListModels()
 }
 
 // Forward sends the rewritten request body to the provider and copies its

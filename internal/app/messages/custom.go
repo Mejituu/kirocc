@@ -114,8 +114,9 @@ func (s *Service) maybeForwardCustom(ctx context.Context, w http.ResponseWriter,
 				s.custom.Forward(ctx, w, r.Header, raw, hit, peek, endpoint)
 				return true
 			} else {
-				// Unreachable: config validation checks custom targets at
-				// startup. Treated like an unknown Kiro target.
+				// Rare: reachable only when a config reload lands between
+				// the mapping match above and this target lookup, removing
+				// the target. Treated like an unknown Kiro target.
 				slog.WarnContext(ctx, "model mapping target unknown", "trace_id", short, "to_model", mapping.ModelTo)
 			}
 		}

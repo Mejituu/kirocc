@@ -98,6 +98,7 @@ func run(ctx context.Context, args []string) error {
 	var customProxy *customprov.Proxy
 	if customReg != nil {
 		customProxy = customprov.NewProxy(customReg, cfg.ResponseHeaderTimeout)
+		go customProxy.WatchConfig(ctx)
 	}
 	srv := buildServer(authMgr, kiroClient, cfg, webSearch, usage, customProxy)
 

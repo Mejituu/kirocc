@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -944,7 +945,13 @@ func TestLoadFile_PermissionWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := buf.String()
-	if !strings.Contains(logs, "chmod 600") {
+	if runtime.GOOS == "windows" {
+		// Windows synthesizes permission bits from the read-only attribute, so
+		// the warning is intentionally skipped there.
+		if strings.Contains(logs, "chmod 600") {
+			t.Errorf("Windows should not emit the chmod warning, logs:\n%s", logs)
+		}
+	} else if !strings.Contains(logs, "chmod 600") {
 		t.Errorf("expected a chmod 600 warning, logs:\n%s", logs)
 	}
 	// The token must not surface in any log line, warning or info.
