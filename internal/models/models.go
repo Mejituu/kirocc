@@ -86,6 +86,7 @@ var modelMapOrdered = []Mapping{
 	{Anthropic: "claude-fable-5-1[1m]", Kiro: "claude-fable-5.1", Kiro1M: "claude-fable-5.1", DisplayName: "Fable 5.1"},
 	{Anthropic: "claude-opus-5-5[1m]", Kiro: "claude-opus-5.5", Kiro1M: "claude-opus-5.5", DisplayName: "Opus 5.5"},
 	{Anthropic: "claude-sonnet-5-5[1m]", Kiro: "claude-sonnet-5.5", Kiro1M: "claude-sonnet-5.5", DisplayName: "Sonnet 5.5"},
+	{Anthropic: "claude-haiku-5-5[1m]", Kiro: "claude-haiku-5.5", Kiro1M: "claude-haiku-5.5", DisplayName: "Haiku 5.5"},
 	{Anthropic: "claude-opus-5", Kiro: "claude-opus-5", Kiro1M: "claude-opus-5"},
 	{Anthropic: "claude-opus-4-8", Kiro: "claude-opus-4.8", Kiro1M: "claude-opus-4.8"},
 	{Anthropic: "claude-opus-4-7", Kiro: "claude-opus-4.7", Kiro1M: "claude-opus-4.7"},
@@ -93,6 +94,7 @@ var modelMapOrdered = []Mapping{
 	{Anthropic: "claude-fable-5-1", Kiro: "claude-fable-5.1", Kiro1M: "claude-fable-5.1"},
 	{Anthropic: "claude-opus-5-5", Kiro: "claude-opus-5.5", Kiro1M: "claude-opus-5.5"},
 	{Anthropic: "claude-sonnet-5-5", Kiro: "claude-sonnet-5.5", Kiro1M: "claude-sonnet-5.5"},
+	{Anthropic: "claude-haiku-5-5", Kiro: "claude-haiku-5.5", Kiro1M: "claude-haiku-5.5"},
 	{Anthropic: "claude-sonnet-4-6", Kiro: "claude-sonnet-4.6", Kiro1M: "claude-sonnet-4.6-1m", DisplayName: "Sonnet 4.6"},
 	// No DisplayName, so this legacy row stays out of the picker (and gets no
 	// `[1m]` entry) even though it has a 1M SKU. Deliberate: give it a display

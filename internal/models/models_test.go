@@ -179,6 +179,13 @@ func TestResolve(t *testing.T) {
 			wantAnthropicModel: "claude-sonnet-5-5[1m]",
 		},
 		{
+			name:               "claude-haiku-5-5 always resolves to 1m without thinking",
+			model:              "claude-haiku-5-5",
+			wantKiroModel:      "claude-haiku-5.5",
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-haiku-5-5[1m]",
+		},
+		{
 			name:               "claude-fable-5-1[1m] exact-match preserves suffix without thinking",
 			model:              "claude-fable-5-1[1m]",
 			wantKiroModel:      "claude-fable-5.1",
@@ -198,6 +205,13 @@ func TestResolve(t *testing.T) {
 			wantKiroModel:      "claude-sonnet-5.5",
 			wantContextWindow:  ThinkingContextWindowSize,
 			wantAnthropicModel: "claude-sonnet-5-5[1m]",
+		},
+		{
+			name:               "claude-haiku-5-5[1m] exact-match preserves suffix without thinking",
+			model:              "claude-haiku-5-5[1m]",
+			wantKiroModel:      "claude-haiku-5.5",
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-haiku-5-5[1m]",
 		},
 		{
 			name:               "claude-fable-5-1 with context1M keeps thinking off",
@@ -224,6 +238,14 @@ func TestResolve(t *testing.T) {
 			wantAnthropicModel: "claude-sonnet-5-5[1m]",
 		},
 		{
+			name:               "claude-haiku-5-5 with context1M keeps thinking off",
+			model:              "claude-haiku-5-5",
+			context1M:          true,
+			wantKiroModel:      "claude-haiku-5.5",
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-haiku-5-5[1m]",
+		},
+		{
 			name:               "kiro dotted claude-fable-5.1 resolves to hyphen anthropic form",
 			model:              "claude-fable-5.1",
 			wantKiroModel:      "claude-fable-5.1",
@@ -243,6 +265,13 @@ func TestResolve(t *testing.T) {
 			wantKiroModel:      "claude-sonnet-5.5",
 			wantContextWindow:  ThinkingContextWindowSize,
 			wantAnthropicModel: "claude-sonnet-5-5[1m]",
+		},
+		{
+			name:               "kiro dotted claude-haiku-5.5 resolves to hyphen anthropic form",
+			model:              "claude-haiku-5.5",
+			wantKiroModel:      "claude-haiku-5.5",
+			wantContextWindow:  ThinkingContextWindowSize,
+			wantAnthropicModel: "claude-haiku-5-5[1m]",
 		},
 		{
 			name:               "claude-sonnet-4-6",
@@ -517,6 +546,10 @@ func TestListModels(t *testing.T) {
 			checkModel: "claude-sonnet-5.5",
 		},
 		{
+			name:       "claude-haiku-5.5 is listed exactly once (both alias rows dedupe to one Kiro value)",
+			checkModel: "claude-haiku-5.5",
+		},
+		{
 			name:       "canonical GPT ID is listed",
 			checkModel: "gpt-5.6-sol",
 		},
@@ -592,6 +625,7 @@ func TestListModels_DisplayNames(t *testing.T) {
 		{id: "claude-fable-5-1[1m]", want: "Fable 5.1 (1M context)"},
 		{id: "claude-opus-5-5[1m]", want: "Opus 5.5 (1M context)"},
 		{id: "claude-sonnet-5-5[1m]", want: "Sonnet 5.5 (1M context)"},
+		{id: "claude-haiku-5-5[1m]", want: "Haiku 5.5 (1M context)"},
 		// Separate 1M SKU: both windows are pickable.
 		{id: "claude-sonnet-4-6", want: "Sonnet 4.6"},
 		{id: "claude-sonnet-4-6[1m]", want: "Sonnet 4.6 (1M context)"},

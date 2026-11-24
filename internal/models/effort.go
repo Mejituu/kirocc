@@ -50,6 +50,7 @@ var effortCapabilities = map[string]effortCapability{
 	"claude-fable-5.1":  {levels: fullEffortLevels},
 	"claude-opus-5.5":   {levels: fullEffortLevels},
 	"claude-sonnet-5.5": {levels: fullEffortLevels},
+	"claude-haiku-5.5":  {levels: fullEffortLevels},
 	// 5-value enum (includes xhigh); 64000 max-output model.
 	"claude-sonnet-5": {levels: fullEffortLevels},
 	// 4-value enum (no xhigh); 64000 max-output models.
