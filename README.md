@@ -366,6 +366,14 @@ Within a group, rules match in order and the first hit wins. A rule's `model` is
 {web_search: true, to: {model: 'qwen3.8-max'}}
 ```
 
+A rule's `model` may also use glob metacharacters: `*` (any run of characters, possibly empty), `?` (exactly one character), and `[set]`/`[a-z]` (one character from a set). The glob always matches the whole model — no prefix or suffix sneaks in. A `-` at a `[set]` boundary is a literal member (POSIX fnmatch style), so `[.-]` matches `.` or `-`; only a dash between two characters, as in `[a-z]`, is a range. A pattern with no metacharacters stays a plain literal, so existing rules are unaffected. The two spellings of one model can share a single rule:
+
+```json5
+{model: 'claude-haiku-5[.-]5', to: {model: 'deepseek-v4.1-flash-1017'}}
+```
+
+matches `claude-haiku-5-5` and `claude-haiku-5.5` (and neither `claude-haiku-55` nor `claude-haiku-4-5`). Write glob rules after more specific literal rules — the first hit wins, and overlapping glob rules are not detected. A malformed pattern (an unterminated `[set]`) is rejected at startup or config reload. `to.model` never supports glob metacharacters: it must name a real model.
+
 where `qwen3.8-max` is a model of the target provider declared with `web_search: true`. `to.model` is used verbatim: a `kiro` target is checked per request against kirocc's model table, while a custom target must be exactly one of that provider's model **ids** (aliases are rejected) and is checked at startup. A `web_search` rule with a custom target must point at a model declared with `web_search: true` — a model without the flag will not search — under the same startup check; `kiro` targets are not validated.
 
 A session's provider is set by its most recent unmapped `POST /v1/messages` request carrying the `X-Claude-Code-Session-Id` header — custom-model requests record their provider, everything else records `kiro`. Mapped requests never change the session's provider, and a session with no record yet is never mapped. `POST /v1/messages/count_tokens` neither reads nor writes the session table and is never mapped. When a mapping's target turns out unknown, kirocc warns (`model mapping target unknown`) and routes the request normally without touching the session.

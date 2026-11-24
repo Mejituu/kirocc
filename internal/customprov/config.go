@@ -451,6 +451,13 @@ func compileMappings(path, groupLoc string, rules []mappingRule, defaultProvider
 		if rule.Model == "" && !webSearch {
 			return nil, fmt.Errorf("%s: %s.mappings[%d].model must not be empty", path, groupLoc, i)
 		}
+		// A glob pattern is compiled and validated at load time so a typo
+		// never reaches the request path; a malformed pattern there would
+		// silently never match. Literal patterns cannot fail this check.
+		modelPat := compileModelPattern(trimOneMSuffix(rule.Model))
+		if modelPat.kind == kindNever {
+			return nil, fmt.Errorf("%s: %s.mappings[%d].model: malformed glob pattern %q", path, groupLoc, i, rule.Model)
+		}
 		if rule.To.Model == "" {
 			return nil, fmt.Errorf("%s: %s.mappings[%d].to.model must not be empty", path, groupLoc, i)
 		}
@@ -479,7 +486,10 @@ func compileMappings(path, groupLoc string, rules []mappingRule, defaultProvider
 			}
 		}
 		m := Mapping{
-			Model:     trimOneMSuffix(rule.Model),
+			// Model keeps the canonical pattern text for duplicate
+			// detection; the load-time-compiled matcher does the matching.
+			Model:     modelPat.text(),
+			model:     modelPat,
 			Thinking:  rule.Thinking,
 			Stream:    rule.Stream,
 			WebSearch: rule.WebSearch,
