@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,11 @@ import (
 )
 
 const tokenValidityBuffer = 5 * time.Minute
+
+// ErrRefreshTokenExpired marks a refresh rejected because the stored refresh
+// token is past its absolute lifetime. The wrapped error text tells the
+// operator how to recover.
+var ErrRefreshTokenExpired = errors.New("refresh token expired or invalid")
 
 // Option configures an AuthManager.
 type Option func(*AuthManager)
@@ -166,7 +172,7 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	}
 	m.mu.Unlock()
 
-	creds, err := m.readFromDB()
+	creds, source, err := m.readFromDB()
 	if err != nil {
 		return nil, err
 	}
@@ -182,9 +188,10 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	// DB token also expired — refresh (no lock held during HTTP call).
 	slog.Info("credentials expired, refreshing", "auth_type", creds.AuthType, "region", creds.Region)
 	var refreshed *Credentials
+	var carriedRefreshToken bool
 	if creds.AuthType == "social" {
 		endpoint := m.socialEndpointFn(creds.Region)
-		refreshed, err = m.refreshSocialToken(ctx, creds, endpoint)
+		refreshed, carriedRefreshToken, err = m.refreshSocialToken(ctx, creds, endpoint)
 	} else {
 		// IDC/OIDC: require device registration (ClientID + ClientSecret).
 		if creds.ClientID == "" || creds.ClientSecret == "" {
@@ -194,7 +201,7 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 			return nil, fmt.Errorf("token refresh: idc credentials missing region (check kiro-cli configuration)")
 		}
 		endpoint := m.oidcEndpointFn(creds.SSORegion)
-		refreshed, err = m.refreshOIDCToken(ctx, creds, endpoint)
+		refreshed, carriedRefreshToken, err = m.refreshOIDCToken(ctx, creds, endpoint)
 	}
 	if err != nil {
 		slog.Error("token refresh failed", "auth_type", creds.AuthType, "err", err)
@@ -211,6 +218,12 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 		refreshed.ProfileARN = creds.ProfileARN
 	}
 
+	// A rotated refresh token would be lost on exit unless it goes back into
+	// the kiro-cli database; without one the database stays untouched.
+	if carriedRefreshToken {
+		m.persistRefreshedToken(ctx, source, creds.RefreshToken, refreshed)
+	}
+
 	slog.Info("token refreshed", credentialLogAttrs(refreshed)...)
 
 	m.mu.Lock()
@@ -219,17 +232,41 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	return refreshed, nil
 }
 
-// readFromDB opens (or reuses) the SQLite DB and reads credentials.
-func (m *AuthManager) readFromDB() (*Credentials, error) {
+// readFromDB opens (or reuses) the SQLite DB and reads credentials together
+// with the source row description.
+func (m *AuthManager) readFromDB() (*Credentials, *credentialSource, error) {
 	if m.db != nil {
-		return ReadCredentials(m.db)
+		return readCredentials(m.db)
 	}
 	db, err := OpenDB(m.dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("open db: %w", err)
+		return nil, nil, fmt.Errorf("open db: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-	return ReadCredentials(db)
+	return readCredentials(db)
+}
+
+// persistRefreshedToken writes a rotated refresh token back into the kiro-cli
+// row the credential came from. Any failure is logged and swallowed: the
+// refreshed credentials are already valid in memory and must serve requests.
+func (m *AuthManager) persistRefreshedToken(ctx context.Context, source *credentialSource, oldRefreshToken string, refreshed *Credentials) {
+	if source == nil {
+		return
+	}
+	var err error
+	if m.db != nil {
+		err = writeBackCredentials(ctx, m.db, source, oldRefreshToken, refreshed)
+	} else {
+		var db *sql.DB
+		db, err = openRWDB(m.dbPath)
+		if err == nil {
+			defer func() { _ = db.Close() }()
+			err = writeBackCredentials(ctx, db, source, oldRefreshToken, refreshed)
+		}
+	}
+	if err != nil {
+		slog.Warn("credential write-back failed", "key", source.Key, "err", err)
+	}
 }
 
 // isTokenValid reports whether the token expires more than tokenValidityBuffer from now.
@@ -261,6 +298,10 @@ func (m *AuthManager) doTokenRefresh(ctx context.Context, endpoint string, body 
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if isExpiredRefreshTokenBody(errBody) {
+			slog.Warn("token refresh: invalid refresh token", "label", label, "status", resp.StatusCode, "body", string(errBody))
+			return nil, fmt.Errorf("%w: refreshToken 已到绝对有效期，请用 kiro-cli 重新登录，或改用 KIRO_API_KEY", ErrRefreshTokenExpired)
+		}
 		slog.Debug("token refresh: error response body", "label", label, "status", resp.StatusCode, "body", string(errBody))
 		return nil, fmt.Errorf("%s token endpoint returned %d", label, resp.StatusCode)
 	}
@@ -277,11 +318,22 @@ func (m *AuthManager) doTokenRefresh(ctx context.Context, endpoint string, body 
 		return nil, fmt.Errorf("%s token response: invalid expiresIn %d", label, result.ExpiresIn)
 	}
 
+	// Never log the token itself, only whether a rotated one came back.
+	slog.Info(label+" refresh response carried refresh_token", "carried", result.RefreshToken != "")
 	return &result, nil
 }
 
-// refreshOIDCToken calls the AWS SSO OIDC token endpoint.
-func (m *AuthManager) refreshOIDCToken(ctx context.Context, creds *Credentials, endpoint string) (*Credentials, error) {
+// isExpiredRefreshTokenBody reports whether an OIDC/social error body says the
+// refresh token itself is invalid or past its lifetime.
+func isExpiredRefreshTokenBody(body []byte) bool {
+	lower := bytes.ToLower(body)
+	return bytes.Contains(lower, []byte("invalid_grant")) ||
+		bytes.Contains(lower, []byte("expired_token"))
+}
+
+// refreshOIDCToken calls the AWS SSO OIDC token endpoint. The second result
+// reports whether the response carried a rotated refresh token.
+func (m *AuthManager) refreshOIDCToken(ctx context.Context, creds *Credentials, endpoint string) (*Credentials, bool, error) {
 	body, err := json.Marshal(map[string]string{
 		"grantType":    "refresh_token",
 		"clientId":     creds.ClientID,
@@ -289,33 +341,34 @@ func (m *AuthManager) refreshOIDCToken(ctx context.Context, creds *Credentials, 
 		"refreshToken": creds.RefreshToken,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return nil, false, fmt.Errorf("marshal request: %w", err)
 	}
 
 	result, err := m.doTokenRefresh(ctx, endpoint, body, "oidc")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	return &Credentials{
 		AccessToken:  result.AccessToken,
 		RefreshToken: coalesce(result.RefreshToken, creds.RefreshToken),
 		ExpiresAt:    time.Now().Unix() + result.ExpiresIn,
-	}, nil
+	}, result.RefreshToken != "", nil
 }
 
-// refreshSocialToken calls the Kiro Desktop social auth refresh endpoint.
-func (m *AuthManager) refreshSocialToken(ctx context.Context, creds *Credentials, endpoint string) (*Credentials, error) {
+// refreshSocialToken calls the Kiro Desktop social auth refresh endpoint. The
+// second result reports whether the response carried a rotated refresh token.
+func (m *AuthManager) refreshSocialToken(ctx context.Context, creds *Credentials, endpoint string) (*Credentials, bool, error) {
 	body, err := json.Marshal(map[string]string{
 		"refreshToken": creds.RefreshToken,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return nil, false, fmt.Errorf("marshal request: %w", err)
 	}
 
 	result, err := m.doTokenRefresh(ctx, endpoint, body, "social")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	return &Credentials{
@@ -323,7 +376,7 @@ func (m *AuthManager) refreshSocialToken(ctx context.Context, creds *Credentials
 		RefreshToken: coalesce(result.RefreshToken, creds.RefreshToken),
 		ExpiresAt:    time.Now().Unix() + result.ExpiresIn,
 		ProfileARN:   result.ProfileArn,
-	}, nil
+	}, result.RefreshToken != "", nil
 }
 
 // credentialLogAttrs describes a loaded credential for the startup log: which

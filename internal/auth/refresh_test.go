@@ -1,11 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json/v2"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,7 +99,7 @@ func TestRefreshToken_Success(t *testing.T) {
 		SSORegion:    "us-east-1",
 	}
 
-	result, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL+"/token")
+	result, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL+"/token")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -122,7 +127,7 @@ func TestRefreshToken_Failure(t *testing.T) {
 		SSORegion:    "us-east-1",
 	}
 
-	_, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL+"/token")
+	_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL+"/token")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -312,7 +317,7 @@ func TestRefreshSocialToken_Success(t *testing.T) {
 		AuthType:     "social",
 	}
 
-	result, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(context.Background(), creds, srv.URL)
+	result, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(context.Background(), creds, srv.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -334,7 +339,7 @@ func TestRefreshSocialToken_Failure(t *testing.T) {
 	defer srv.Close()
 
 	creds := &Credentials{RefreshToken: "bad"}
-	_, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(context.Background(), creds, srv.URL)
+	_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(context.Background(), creds, srv.URL)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -399,7 +404,7 @@ func TestRefreshOIDCToken_EmptyAccessToken(t *testing.T) {
 	defer srv.Close()
 
 	creds := &Credentials{RefreshToken: "ref", ClientID: "c", ClientSecret: "s"}
-	_, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
+	_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
 	if err == nil {
 		t.Fatal("expected error for empty accessToken")
 	}
@@ -418,7 +423,7 @@ func TestRefreshOIDCToken_ZeroExpiresIn(t *testing.T) {
 	defer srv.Close()
 
 	creds := &Credentials{RefreshToken: "ref", ClientID: "c", ClientSecret: "s"}
-	_, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
+	_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
 	if err == nil {
 		t.Fatal("expected error for zero expiresIn")
 	}
@@ -437,7 +442,7 @@ func TestRefreshSocialToken_EmptyAccessToken(t *testing.T) {
 	defer srv.Close()
 
 	creds := &Credentials{RefreshToken: "ref"}
-	_, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(context.Background(), creds, srv.URL)
+	_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(context.Background(), creds, srv.URL)
 	if err == nil {
 		t.Fatal("expected error for empty accessToken")
 	}
@@ -461,7 +466,7 @@ func TestRefreshOIDCToken_RespectsContext(t *testing.T) {
 	defer cancel()
 
 	creds := &Credentials{RefreshToken: "ref", ClientID: "c", ClientSecret: "s"}
-	_, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(ctx, creds, srv.URL)
+	_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(ctx, creds, srv.URL)
 	if err == nil {
 		t.Fatal("expected error from context timeout")
 	}
@@ -484,7 +489,7 @@ func TestRefreshSocialToken_RespectsContext(t *testing.T) {
 	defer cancel()
 
 	creds := &Credentials{RefreshToken: "ref"}
-	_, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(ctx, creds, srv.URL)
+	_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshSocialToken(ctx, creds, srv.URL)
 	if err == nil {
 		t.Fatal("expected error from context timeout")
 	}
@@ -517,4 +522,529 @@ func TestNewAuthManager(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nonexistent DB, got nil")
 	}
+}
+
+// captureLogs redirects the default slog logger for one test and returns the
+// captured output. Debug is enabled so write-back skip decisions are visible.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
+}
+
+func insertTokenRow(t *testing.T, db *sql.DB, key, value string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO auth_kv (key, value) VALUES (?, ?)`, key, value); err != nil {
+		t.Fatalf("insert %s: %v", key, err)
+	}
+}
+
+func insertStateRow(t *testing.T, db *sql.DB, key, value string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO state (key, value) VALUES (?, ?)`, key, value); err != nil {
+		t.Fatalf("insert state %s: %v", key, err)
+	}
+}
+
+func readTokenRow(t *testing.T, db *sql.DB, key string) string {
+	t.Helper()
+	var value string
+	if err := db.QueryRow(`SELECT value FROM auth_kv WHERE key = ?`, key).Scan(&value); err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+	return value
+}
+
+func decodeTokenRow(t *testing.T, value string) map[string]any {
+	t.Helper()
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		t.Fatalf("decode token row %q: %v", value, err)
+	}
+	return decoded
+}
+
+func assertExpiryNear(t *testing.T, got, want int64) {
+	t.Helper()
+	if diff := got - want; diff < -120 || diff > 120 {
+		t.Fatalf("expiry = %d, want about %d (diff %d)", got, want, diff)
+	}
+}
+
+// oidcRefreshServer answers every token request with the given values; an empty
+// refreshToken omits the field, as AWS does when it does not rotate it.
+func oidcRefreshServer(t *testing.T, accessToken, refreshToken string, expiresIn int64) *httptest.Server {
+	t.Helper()
+	return newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := map[string]any{
+			"accessToken": accessToken,
+			"expiresIn":   expiresIn,
+		}
+		if refreshToken != "" {
+			response["refreshToken"] = refreshToken
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.MarshalWrite(w, response)
+		_, _ = w.Write([]byte("\n"))
+	}))
+}
+
+// createFileTestDB creates a schema-initialized SQLite file, exercising the
+// production read-only/mode=rw open paths instead of the injected in-memory DB.
+func createFileTestDB(t *testing.T) (string, *sql.DB) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "kiro-cli.sqlite3")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open file db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	createAuthSchema(t, db)
+	return path, db
+}
+
+func TestAuthManager_WriteBack_OIDCCamelNumeric(t *testing.T) {
+	expired := time.Now().Add(-time.Minute).Unix()
+	db := setupTestDBWithCreds(t, "old-access", "old-refresh", expired, "us-east-1")
+	defer func() { _ = db.Close() }()
+
+	seed, _ := json.Marshal(map[string]any{
+		"accessToken":  "old-access",
+		"refreshToken": "old-refresh",
+		"expiresAt":    expired,
+		"region":       "us-east-1",
+		"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/p",
+		"scopes":       []string{"sso:account:access"},
+		"start_url":    "https://example.invalid/start",
+		"oauth_flow":   "device",
+	})
+	if _, err := db.Exec(`UPDATE auth_kv SET value = ? WHERE key = ?`, string(seed), "kirocli:odic:token"); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+
+	srv := oidcRefreshServer(t, "new-access", "new-refresh", 28800)
+	defer srv.Close()
+	mgr := newAuthManagerWithDB(db)
+	mgr.oidcEndpointFn = func(string) string { return srv.URL }
+
+	creds, err := mgr.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if creds.AccessToken != "new-access" {
+		t.Fatalf("AccessToken = %q, want new-access", creds.AccessToken)
+	}
+
+	row := decodeTokenRow(t, readTokenRow(t, db, "kirocli:odic:token"))
+	if strings.HasSuffix(readTokenRow(t, db, "kirocli:odic:token"), "\n") {
+		t.Fatal("stored token JSON has a trailing newline")
+	}
+	if row["accessToken"] != "new-access" || row["refreshToken"] != "new-refresh" {
+		t.Fatalf("managed fields not updated: %v", row)
+	}
+	if _, ok := row["access_token"]; ok {
+		t.Fatalf("camelCase row gained snake_case fields: %v", row)
+	}
+	if _, ok := row["refresh_token"]; ok {
+		t.Fatalf("camelCase row gained snake_case fields: %v", row)
+	}
+	expires, ok := row["expiresAt"].(float64)
+	if !ok {
+		t.Fatalf("expiresAt type = %T, want number: %v", row["expiresAt"], row)
+	}
+	assertExpiryNear(t, int64(expires), time.Now().Unix()+28800)
+	for key, want := range map[string]any{
+		"region":      "us-east-1",
+		"profile_arn": "arn:aws:codewhisperer:us-east-1:123:profile/p",
+		"start_url":   "https://example.invalid/start",
+		"oauth_flow":  "device",
+	} {
+		if row[key] != want {
+			t.Fatalf("extra field %s = %v, want %v", key, row[key], want)
+		}
+	}
+	scopes, ok := row["scopes"].([]any)
+	if !ok || len(scopes) != 1 || scopes[0] != "sso:account:access" {
+		t.Fatalf("scopes = %v, want [sso:account:access]", row["scopes"])
+	}
+}
+
+func TestAuthManager_WriteBack_SnakeTargetsHitKey(t *testing.T) {
+	db := setupTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	expired := time.Now().Add(-time.Minute).Unix()
+	seed, _ := json.Marshal(map[string]any{
+		"access_token":  "old-access",
+		"refresh_token": "old-refresh",
+		"expires_at":    expired,
+		"oauth_flow":    "device",
+		"start_url":     "https://example.invalid/start",
+	})
+	insertTokenRow(t, db, "codewhisperer:odic:token", string(seed))
+	insertTokenRow(t, db, "kirocli:odic:device-registration", `{"clientId":"cid","clientSecret":"csec"}`)
+	insertStateRow(t, db, "auth.idc.region", "us-east-1")
+
+	srv := oidcRefreshServer(t, "new-access", "new-refresh", 28800)
+	defer srv.Close()
+	mgr := newAuthManagerWithDB(db)
+	mgr.oidcEndpointFn = func(string) string { return srv.URL }
+
+	if _, err := mgr.GetToken(context.Background()); err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+
+	row := decodeTokenRow(t, readTokenRow(t, db, "codewhisperer:odic:token"))
+	if row["access_token"] != "new-access" || row["refresh_token"] != "new-refresh" {
+		t.Fatalf("managed fields not updated: %v", row)
+	}
+	if _, ok := row["accessToken"]; ok {
+		t.Fatalf("snake_case row gained camelCase fields: %v", row)
+	}
+	expires, ok := row["expires_at"].(float64)
+	if !ok {
+		t.Fatalf("expires_at type = %T, want number: %v", row["expires_at"], row)
+	}
+	assertExpiryNear(t, int64(expires), time.Now().Unix()+28800)
+	if row["oauth_flow"] != "device" || row["start_url"] != "https://example.invalid/start" {
+		t.Fatalf("extra fields changed: %v", row)
+	}
+
+	var created int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM auth_kv WHERE key = ?`, "kirocli:odic:token").Scan(&created); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if created != 0 {
+		t.Fatalf("write-back created kirocli:odic:token instead of updating the hit key")
+	}
+}
+
+func TestAuthManager_WriteBack_SocialISOExpiry(t *testing.T) {
+	db := setupTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	oldISO := time.Now().Add(-time.Minute).UTC().Format("2006-01-02T15:04:05.000Z")
+	seed, _ := json.Marshal(map[string]any{
+		"accessToken":  "old-social-access",
+		"refreshToken": "old-social-refresh",
+		"expiresAt":    oldISO,
+		"region":       "us-east-1",
+		"profileArn":   "arn:aws:codewhisperer:us-east-1:123:profile/social",
+		"start_url":    "https://example.invalid/social",
+	})
+	insertTokenRow(t, db, "kirocli:social:token", string(seed))
+
+	srv := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.MarshalWrite(w, map[string]any{
+			"accessToken":  "social-new-access",
+			"refreshToken": "social-new-refresh",
+			"expiresIn":    7200,
+			"profileArn":   "arn:aws:codewhisperer:us-east-1:123:profile/other",
+		})
+		_, _ = w.Write([]byte("\n"))
+	}))
+	defer srv.Close()
+
+	mgr := newAuthManagerWithDB(db)
+	mgr.socialEndpointFn = func(string) string { return srv.URL }
+
+	creds, err := mgr.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if creds.AuthType != "social" {
+		t.Fatalf("AuthType = %q, want social", creds.AuthType)
+	}
+
+	row := decodeTokenRow(t, readTokenRow(t, db, "kirocli:social:token"))
+	if row["accessToken"] != "social-new-access" || row["refreshToken"] != "social-new-refresh" {
+		t.Fatalf("managed fields not updated: %v", row)
+	}
+	iso, ok := row["expiresAt"].(string)
+	if !ok {
+		t.Fatalf("expiresAt type = %T, want ISO string: %v", row["expiresAt"], row)
+	}
+	if !strings.HasSuffix(iso, "Z") || !strings.Contains(iso, ".") {
+		t.Fatalf("expiresAt lost its ISO shape: %q", iso)
+	}
+	fraction := strings.TrimSuffix(iso[strings.IndexByte(iso, '.')+1:], "Z")
+	if len(fraction) != 3 {
+		t.Fatalf("expiresAt fraction = %q, want 3 digits", fraction)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, iso)
+	if err != nil {
+		t.Fatalf("parse expiresAt %q: %v", iso, err)
+	}
+	assertExpiryNear(t, parsed.Unix(), time.Now().Unix()+7200)
+	// profileArn is not a managed field: the row keeps its old value even
+	// though the refresh response carried a new one.
+	if row["profileArn"] != "arn:aws:codewhisperer:us-east-1:123:profile/social" {
+		t.Fatalf("extra profileArn changed: %v", row["profileArn"])
+	}
+	if row["start_url"] != "https://example.invalid/social" {
+		t.Fatalf("extra start_url changed: %v", row["start_url"])
+	}
+}
+
+func TestAuthManager_WriteBack_SkippedWithoutRotatedRefreshToken(t *testing.T) {
+	expired := time.Now().Add(-time.Minute).Unix()
+	db := setupTestDBWithCreds(t, "old-access", "old-refresh", expired, "us-east-1")
+	defer func() { _ = db.Close() }()
+	before := readTokenRow(t, db, "kirocli:odic:token")
+
+	srv := oidcRefreshServer(t, "new-access", "", 28800)
+	defer srv.Close()
+	mgr := newAuthManagerWithDB(db)
+	mgr.oidcEndpointFn = func(string) string { return srv.URL }
+
+	if _, err := mgr.GetToken(context.Background()); err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if after := readTokenRow(t, db, "kirocli:odic:token"); after != before {
+		t.Fatalf("database changed without a rotated refresh token:\n before %s\n after  %s", before, after)
+	}
+}
+
+func TestAuthManager_WriteBack_GuardSkipsConcurrentLogin(t *testing.T) {
+	expired := time.Now().Add(-time.Minute).Unix()
+	db := setupTestDBWithCreds(t, "old-access", "old-refresh", expired, "us-east-1")
+	defer func() { _ = db.Close() }()
+
+	replacement, _ := json.Marshal(map[string]any{
+		"accessToken":  "kiro-cli-access",
+		"refreshToken": "kiro-cli-refresh",
+		"expiresAt":    time.Now().Add(8 * time.Hour).Unix(),
+	})
+	srv := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Another writer replaces the login while the refresh is in flight.
+		if _, err := db.Exec(`UPDATE auth_kv SET value = ? WHERE key = ?`, string(replacement), "kirocli:odic:token"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.MarshalWrite(w, map[string]any{
+			"accessToken":  "new-access",
+			"refreshToken": "new-refresh",
+			"expiresIn":    28800,
+		})
+		_, _ = w.Write([]byte("\n"))
+	}))
+	defer srv.Close()
+
+	logs := captureLogs(t)
+	mgr := newAuthManagerWithDB(db)
+	mgr.oidcEndpointFn = func(string) string { return srv.URL }
+
+	creds, err := mgr.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if creds.AccessToken != "new-access" {
+		t.Fatalf("AccessToken = %q, want new-access", creds.AccessToken)
+	}
+
+	row := decodeTokenRow(t, readTokenRow(t, db, "kirocli:odic:token"))
+	if row["refreshToken"] != "kiro-cli-refresh" || row["accessToken"] != "kiro-cli-access" {
+		t.Fatalf("write-back overwrote the concurrent login: %v", row)
+	}
+	if !strings.Contains(logs.String(), "refresh token changed in database") {
+		t.Fatalf("guard skip not logged:\n%s", logs.String())
+	}
+}
+
+func TestAuthManager_WriteBack_FailureKeepsRefreshedCredentials(t *testing.T) {
+	expired := time.Now().Add(-time.Minute).Unix()
+	db := setupTestDBWithCreds(t, "old-access", "old-refresh", expired, "us-east-1")
+	defer func() { _ = db.Close() }()
+	before := readTokenRow(t, db, "kirocli:odic:token")
+
+	if _, err := db.Exec(`CREATE TRIGGER fail_auth_kv_update BEFORE UPDATE ON auth_kv BEGIN SELECT RAISE(ABORT, 'blocked'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	logs := captureLogs(t)
+
+	srv := oidcRefreshServer(t, "new-access", "new-refresh", 28800)
+	defer srv.Close()
+	mgr := newAuthManagerWithDB(db)
+	mgr.oidcEndpointFn = func(string) string { return srv.URL }
+
+	creds, err := mgr.GetToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetToken must succeed when write-back fails: %v", err)
+	}
+	if creds.AccessToken != "new-access" {
+		t.Fatalf("AccessToken = %q, want new-access", creds.AccessToken)
+	}
+	if after := readTokenRow(t, db, "kirocli:odic:token"); after != before {
+		t.Fatalf("failed write-back changed the row")
+	}
+	if !strings.Contains(logs.String(), "credential write-back failed") {
+		t.Fatalf("write failure not logged:\n%s", logs.String())
+	}
+}
+
+func TestAuthManager_PersistRefreshedToken_BadPathWarns(t *testing.T) {
+	logs := captureLogs(t)
+	mgr := &AuthManager{dbPath: filepath.Join(t.TempDir(), "missing", "kiro-cli.sqlite3")}
+	source := &credentialSource{
+		Key:    "kirocli:odic:token",
+		Fields: tokenFieldNames{Access: "accessToken", Refresh: "refreshToken", Expires: "expiresAt"},
+	}
+	mgr.persistRefreshedToken(context.Background(), source, "old", &Credentials{
+		AccessToken:  "new-access",
+		RefreshToken: "new-refresh",
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
+	if !strings.Contains(logs.String(), "credential write-back failed") {
+		t.Fatalf("bad path not logged:\n%s", logs.String())
+	}
+}
+
+func TestAuthManager_WriteBack_FileDatabase(t *testing.T) {
+	path, db := createFileTestDB(t)
+	expired := time.Now().Add(-time.Minute).Unix()
+	seed, _ := json.Marshal(map[string]any{
+		"accessToken":  "old-access",
+		"refreshToken": "old-refresh",
+		"expiresAt":    expired,
+		"start_url":    "https://example.invalid/start",
+	})
+	insertTokenRow(t, db, "kirocli:odic:token", string(seed))
+	insertTokenRow(t, db, "kirocli:odic:device-registration", `{"clientId":"cid","clientSecret":"csec"}`)
+	insertStateRow(t, db, "auth.idc.region", "us-east-1")
+	_ = db.Close()
+
+	srv := oidcRefreshServer(t, "new-access", "new-refresh", 28800)
+	defer srv.Close()
+	mgr := NewAuthManager(path)
+	mgr.oidcEndpointFn = func(string) string { return srv.URL }
+
+	if _, err := mgr.GetToken(context.Background()); err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+
+	ro, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("open read-only db: %v", err)
+	}
+	defer func() { _ = ro.Close() }()
+	row := decodeTokenRow(t, readTokenRow(t, ro, "kirocli:odic:token"))
+	if row["accessToken"] != "new-access" || row["refreshToken"] != "new-refresh" {
+		t.Fatalf("file database not updated: %v", row)
+	}
+	if row["start_url"] != "https://example.invalid/start" {
+		t.Fatalf("extra field changed: %v", row)
+	}
+}
+
+func TestDoTokenRefresh_LogsRefreshTokenCarried(t *testing.T) {
+	for _, carried := range []bool{true, false} {
+		name := "absent"
+		logged := "carried=false"
+		if carried {
+			name = "carried"
+			logged = "carried=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			logs := captureLogs(t)
+			refreshToken := ""
+			if carried {
+				refreshToken = "rotated-token-value"
+			}
+			srv := oidcRefreshServer(t, "new-access", refreshToken, 3600)
+			defer srv.Close()
+
+			creds := &Credentials{RefreshToken: "old", ClientID: "cid", ClientSecret: "csec", SSORegion: "us-east-1"}
+			_, got, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
+			if err != nil {
+				t.Fatalf("refreshOIDCToken: %v", err)
+			}
+			if got != carried {
+				t.Fatalf("carried = %v, want %v", got, carried)
+			}
+			out := logs.String()
+			if !strings.Contains(out, "refresh response carried refresh_token") {
+				t.Fatalf("observation log missing:\n%s", out)
+			}
+			if !strings.Contains(out, logged) {
+				t.Fatalf("observation log does not say %s:\n%s", logged, out)
+			}
+			if strings.Contains(out, "rotated-token-value") {
+				t.Fatalf("token value leaked into logs:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestDoTokenRefresh_ExpiredRefreshTokenGuidance(t *testing.T) {
+	for _, body := range []string{
+		`{"error":"invalid_grant"}`,
+		`{"error":"expired_token"}`,
+		`{"error":"INVALID_GRANT"}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			logs := captureLogs(t)
+			srv := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, body, http.StatusBadRequest)
+			}))
+			defer srv.Close()
+
+			creds := &Credentials{RefreshToken: "old", ClientID: "cid", ClientSecret: "csec", SSORegion: "us-east-1"}
+			_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
+			if !errors.Is(err, ErrRefreshTokenExpired) {
+				t.Fatalf("err = %v, want ErrRefreshTokenExpired", err)
+			}
+			message := err.Error()
+			if !strings.Contains(message, "kiro-cli 重新登录") || !strings.Contains(message, "KIRO_API_KEY") {
+				t.Fatalf("guidance missing from %q", message)
+			}
+			out := logs.String()
+			if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "invalid refresh token") {
+				t.Fatalf("invalid_grant body not logged at warn:\n%s", out)
+			}
+		})
+	}
+
+	t.Run("other_400_keeps_generic_error", func(t *testing.T) {
+		logs := captureLogs(t)
+		srv := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusBadRequest)
+		}))
+		defer srv.Close()
+
+		creds := &Credentials{RefreshToken: "old", ClientID: "cid", ClientSecret: "csec", SSORegion: "us-east-1"}
+		_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if errors.Is(err, ErrRefreshTokenExpired) {
+			t.Fatalf("plain 400 classified as expired refresh token: %v", err)
+		}
+		if strings.Contains(err.Error(), "KIRO_API_KEY") {
+			t.Fatalf("plain 400 carries guidance: %v", err)
+		}
+		if !strings.Contains(logs.String(), "level=DEBUG") {
+			t.Fatalf("plain error body should stay at debug:\n%s", logs.String())
+		}
+	})
+
+	t.Run("other_401_keeps_generic_error", func(t *testing.T) {
+		srv := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+
+		creds := &Credentials{RefreshToken: "old", ClientID: "cid", ClientSecret: "csec", SSORegion: "us-east-1"}
+		_, _, err := (&AuthManager{httpClient: newDefaultHTTPClient()}).refreshOIDCToken(context.Background(), creds, srv.URL)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if errors.Is(err, ErrRefreshTokenExpired) {
+			t.Fatalf("401 classified as expired refresh token: %v", err)
+		}
+	})
 }

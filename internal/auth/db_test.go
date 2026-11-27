@@ -2,6 +2,7 @@ package auth
 
 import (
 	"database/sql"
+	"encoding/json/jsontext"
 	"os"
 	"testing"
 
@@ -14,7 +15,17 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("failed to open in-memory db: %v", err)
 	}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS auth_kv (key TEXT PRIMARY KEY, value TEXT)`)
+	// Every connection to :memory: would be a separate database; keep the pool
+	// to one connection so reads and write-backs see the same rows.
+	db.SetMaxOpenConns(1)
+	createAuthSchema(t, db)
+	return db
+}
+
+// createAuthSchema creates the kiro-cli tables the auth package reads.
+func createAuthSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS auth_kv (key TEXT PRIMARY KEY, value TEXT)`)
 	if err != nil {
 		t.Fatalf("failed to create auth_kv table: %v", err)
 	}
@@ -22,7 +33,6 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("failed to create state table: %v", err)
 	}
-	return db
 }
 
 func TestReadCredentials(t *testing.T) {
@@ -504,5 +514,50 @@ func TestOpenDB_SpecialCharsInPath(t *testing.T) {
 
 	if err := db.Ping(); err != nil {
 		t.Errorf("Ping: %v", err)
+	}
+}
+
+func TestDetectExpiresFormat(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		wantKind   expiresKind
+		wantLayout string
+		wantUTC    bool
+		wantOffset int
+	}{
+		{"number", `1700000000`, expiresUnix, "", false, 0},
+		{"numeric string", `"1700000000"`, expiresUnixString, "", false, 0},
+		{"iso utc milliseconds", `"2023-11-14T22:13:20.000Z"`, expiresISO, "2006-01-02T15:04:05.000Z07:00", true, 0},
+		{"iso offset", `"2023-11-15T06:13:20+08:00"`, expiresISO, "2006-01-02T15:04:05-07:00", false, 8 * 3600},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectExpiresFormat(jsontext.Value(tt.raw))
+			if got.kind != tt.wantKind || got.layout != tt.wantLayout || got.utc != tt.wantUTC || got.offset != tt.wantOffset {
+				t.Fatalf("detectExpiresFormat(%s) = %+v, want kind=%v layout=%q utc=%v offset=%d",
+					tt.raw, got, tt.wantKind, tt.wantLayout, tt.wantUTC, tt.wantOffset)
+			}
+		})
+	}
+}
+
+func TestExpiresFormatValue(t *testing.T) {
+	tests := []struct {
+		name   string
+		format expiresFormat
+		want   string
+	}{
+		{"number", expiresFormat{kind: expiresUnix}, `1700000000`},
+		{"numeric string", expiresFormat{kind: expiresUnixString}, `"1700000000"`},
+		{"iso utc", expiresFormat{kind: expiresISO, layout: "2006-01-02T15:04:05.000Z07:00", utc: true}, `"2023-11-14T22:13:20.000Z"`},
+		{"iso offset", expiresFormat{kind: expiresISO, layout: "2006-01-02T15:04:05-07:00", offset: 8 * 3600}, `"2023-11-15T06:13:20+08:00"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(tt.format.value(1700000000)); got != tt.want {
+				t.Fatalf("formatExpires = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
