@@ -1,6 +1,7 @@
 package customprov
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -27,6 +28,25 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, med
 		return nil, mediaCounts{}, fmt.Errorf("decode anthropic request: %w", err)
 	}
 
+	// Deferred-tool blocks (Claude Code mid-conversation tool additions and
+	// ToolSearch definitions) carry tool definitions the Chat protocol has no
+	// channel for; the blocks themselves are dropped by the per-role
+	// conversion, so their definitions are collected here and appended to the
+	// converted tools below. The byte gate keeps requests without such a
+	// block from paying for the contents slice and the scan.
+	var deferredRefs []deferredToolRef
+	if bytes.Contains(raw, []byte(anthropic.BlockTypeToolDefinition)) {
+		contents := make([]jsontext.Value, len(req.Messages))
+		for i := range req.Messages {
+			contents[i] = req.Messages[i].Content
+		}
+		var err error
+		deferredRefs, err = collectDeferredToolRefs(contents)
+		if err != nil {
+			return nil, mediaCounts{}, fmt.Errorf("collect deferred tools: %w", err)
+		}
+	}
+
 	out := &oaiRequest{
 		Model:       hit.BaseModel,
 		MaxTokens:   req.MaxTokens,
@@ -47,6 +67,7 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, med
 		}
 		out.Messages = append(out.Messages, msgs...)
 	}
+	out.Messages = oaiRelocateSystemAfterToolResults(out.Messages)
 
 	for i := range req.Tools {
 		tool, ok, err := oaiConvertTool(&req.Tools[i])
@@ -57,6 +78,11 @@ func buildOpenAIRequest(raw []byte, hit Hit, info RequestInfo) (*oaiRequest, med
 			out.Tools = append(out.Tools, tool)
 		}
 	}
+	mergedTools, err := oaiMergeDeferredTools(req.Tools, out.Tools, deferredRefs)
+	if err != nil {
+		return nil, mediaCounts{}, err
+	}
+	out.Tools = mergedTools
 
 	choice, ok, err := oaiConvertToolChoice(req.ToolChoice)
 	if err != nil {
@@ -204,6 +230,72 @@ func oaiConvertMessage(m *anthMessage, counts *mediaCounts, textOnly bool) ([]oa
 		return oaiConvertUserBlocks(blocks, counts, textOnly)
 	}
 	return oaiConvertAssistantBlocks(blocks)
+}
+
+// oaiRelocateSystemAfterToolResults moves a run of system messages that sits
+// between an assistant's tool_calls and the tool messages answering them to
+// just after the last matching tool message (rule 7). Chat Completions pairs
+// tool messages with the preceding assistant turn, and a system message in
+// that gap makes upstream models misread the tool results. A run not
+// followed by a matching tool message stays where it is, as does every
+// system message outside such a gap. Synthetic user image messages
+// (flushToolImages) stay after the moved run.
+func oaiRelocateSystemAfterToolResults(msgs []oaiMessage) []oaiMessage {
+	var held map[int]struct{}
+	var insertAfter map[int][]oaiMessage
+	for i := range msgs {
+		msg := &msgs[i]
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		runEnd := i + 1
+		for runEnd < len(msgs) && msgs[runEnd].Role == "system" {
+			runEnd++
+		}
+		if runEnd == i+1 {
+			continue
+		}
+		ids := make(map[string]struct{}, len(msg.ToolCalls))
+		for _, call := range msg.ToolCalls {
+			if call.ID != "" {
+				ids[call.ID] = struct{}{}
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		last := -1
+		for j := runEnd; j < len(msgs) && msgs[j].Role == "tool"; j++ {
+			if _, ok := ids[msgs[j].ToolCallID]; ok {
+				last = j
+			}
+		}
+		if last < 0 {
+			continue
+		}
+		if held == nil {
+			held = make(map[int]struct{})
+			insertAfter = make(map[int][]oaiMessage)
+		}
+		for j := i + 1; j < runEnd; j++ {
+			held[j] = struct{}{}
+			insertAfter[last] = append(insertAfter[last], msgs[j])
+		}
+	}
+	if len(held) == 0 {
+		return msgs
+	}
+	out := make([]oaiMessage, 0, len(msgs))
+	for i, msg := range msgs {
+		if _, ok := held[i]; ok {
+			continue
+		}
+		out = append(out, msg)
+		if moved, ok := insertAfter[i]; ok {
+			out = append(out, moved...)
+		}
+	}
+	return out
 }
 
 // oaiDocumentPlaceholder replaces a document block (PDF and the like) in
@@ -440,6 +532,46 @@ func oaiConvertTool(t *anthTool) (oaiTool, bool, error) {
 			Parameters:  jsontext.Value(params),
 		},
 	}, true, nil
+}
+
+// oaiMergeDeferredTools appends the tool definitions collected from deferred
+// tool blocks to the converted tools (rules 1 and 2). A name already present
+// in the original request wins: existing tools stay first and are never
+// overridden, and new tools follow converted order, then ref order, so the
+// emitted tools stay byte-stable across requests. Definitions without an
+// input schema are skipped like their top-level counterparts.
+func oaiMergeDeferredTools(existing []anthTool, converted []oaiTool, refs []deferredToolRef) ([]oaiTool, error) {
+	if len(refs) == 0 {
+		return converted, nil
+	}
+	seen := make(map[string]struct{}, len(existing)+len(refs))
+	for i := range existing {
+		if existing[i].Name != "" {
+			seen[existing[i].Name] = struct{}{}
+		}
+	}
+	for _, ref := range refs {
+		if ref.Name == "" {
+			continue
+		}
+		if _, ok := seen[ref.Name]; ok {
+			continue
+		}
+		var tool anthTool
+		if err := json.Unmarshal(ref.Definition, &tool); err != nil {
+			return nil, fmt.Errorf("tool %q from deferred blocks: %w", ref.Name, err)
+		}
+		convertedTool, ok, err := oaiConvertTool(&tool)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q from deferred blocks: %w", ref.Name, err)
+		}
+		if !ok {
+			continue
+		}
+		seen[ref.Name] = struct{}{}
+		converted = append(converted, convertedTool)
+	}
+	return converted, nil
 }
 
 // oaiConvertToolChoice maps the Anthropic tool_choice to the Chat

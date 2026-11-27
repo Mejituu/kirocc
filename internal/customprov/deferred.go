@@ -566,6 +566,80 @@ func rewriteDeferredBlock(block jsontext.Value, set *deferredRefSet) (next jsont
 	}
 }
 
+// collectDeferredToolRefs collects tool definitions from message content
+// values without rewriting anything. It is used by the OpenAI path, which
+// drops the original blocks during its own conversion.
+func collectDeferredToolRefs(contents []jsontext.Value) ([]deferredToolRef, error) {
+	var set deferredRefSet
+	for _, content := range contents {
+		if len(content) == 0 || content.Kind() != jsontext.KindBeginArray {
+			continue
+		}
+		if !bytes.Contains(content, []byte(anthropic.BlockTypeToolDefinition)) {
+			continue
+		}
+		var blocks []jsontext.Value
+		if err := json.Unmarshal(content, &blocks); err != nil {
+			return nil, err
+		}
+		for _, block := range blocks {
+			collectDeferredBlockRefs(block, &set)
+		}
+	}
+	return set.refs, nil
+}
+
+func collectDeferredBlockRefs(block jsontext.Value, set *deferredRefSet) {
+	var head struct {
+		Type    string         `json:"type"`
+		Tool    jsontext.Value `json:"tool"`
+		Content jsontext.Value `json:"content"`
+	}
+	if err := json.Unmarshal(block, &head); err != nil {
+		return
+	}
+	switch head.Type {
+	case anthropic.BlockTypeToolAddition:
+		var tool struct {
+			Type       string         `json:"type"`
+			Definition jsontext.Value `json:"definition"`
+		}
+		if len(head.Tool) == 0 {
+			return
+		}
+		if err := json.Unmarshal(head.Tool, &tool); err != nil {
+			return
+		}
+		if tool.Type != anthropic.BlockTypeToolDefinition || len(tool.Definition) == 0 ||
+			tool.Definition.Kind() != jsontext.KindBeginObject {
+			return
+		}
+		set.addDefinition(tool.Definition)
+
+	case anthropic.BlockTypeToolResult:
+		if len(head.Content) == 0 || head.Content.Kind() != jsontext.KindBeginArray {
+			return
+		}
+		var nested []jsontext.Value
+		if err := json.Unmarshal(head.Content, &nested); err != nil {
+			return
+		}
+		for _, item := range nested {
+			var inner struct {
+				Type       string         `json:"type"`
+				Definition jsontext.Value `json:"definition"`
+			}
+			if err := json.Unmarshal(item, &inner); err != nil {
+				continue
+			}
+			if inner.Type == anthropic.BlockTypeToolDefinition && len(inner.Definition) > 0 &&
+				inner.Definition.Kind() == jsontext.KindBeginObject {
+				set.addDefinition(inner.Definition)
+			}
+		}
+	}
+}
+
 // definitionName extracts the name field of a raw tool definition object.
 func definitionName(definition jsontext.Value) string {
 	var def struct {
