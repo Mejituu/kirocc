@@ -53,7 +53,7 @@ const (
 // survive the pass unchanged. Exported for the session-following mappings,
 // which rewrite a request bound for the Kiro path.
 func RewriteModel(raw []byte, model string) ([]byte, error) {
-	out, _, err := rewrite(raw, model, false, false, mediaPolicy{})
+	out, _, err := rewrite(raw, model, false, false, mediaPolicy{}, deferredPolicy{}, deferredPlan{})
 	return out, err
 }
 
@@ -91,7 +91,8 @@ const webSearchSystemAlone = `[` + webSearchBillingBlock + `]`
 // A body with nothing to replace is written exactly as the media-disabled
 // pass writes it.
 func RewriteForward(raw []byte, model string, webSearch bool, media mediaPolicy) ([]byte, mediaCounts, error) {
-	return rewrite(raw, model, true, webSearch, media)
+	plan := analyzeDeferred(raw)
+	return rewrite(raw, model, true, webSearch, media, deferredPolicy{enabled: true}, plan)
 }
 
 // rewrite carries out the token-level pass. stripBilling enables the
@@ -99,7 +100,7 @@ func RewriteForward(raw []byte, model string, webSearch bool, media mediaPolicy)
 // block in the system (only RewriteForward sets it, always alongside
 // stripBilling, since the block must follow the strip pass); model is ""
 // when the model member is not rewritten. media enables the messages pass.
-func rewrite(raw []byte, model string, stripBilling, insertHeader bool, media mediaPolicy) ([]byte, mediaCounts, error) {
+func rewrite(raw []byte, model string, stripBilling, insertHeader bool, media mediaPolicy, deferred deferredPolicy, plan deferredPlan) ([]byte, mediaCounts, error) {
 	dec := jsontext.NewDecoder(bytes.NewReader(raw))
 	var buf bytes.Buffer
 	enc := jsontext.NewEncoder(&buf)
@@ -123,6 +124,7 @@ func rewrite(raw []byte, model string, stripBilling, insertHeader bool, media me
 	depth := 1
 	valueNext := false
 	sawSystem := false
+	sawTools := false
 	var counts mediaCounts
 	for {
 		tok, err := dec.ReadToken()
@@ -166,21 +168,63 @@ func rewrite(raw []byte, model string, stripBilling, insertHeader bool, media me
 				}
 				continue
 			}
-			if key == "messages" && media.enabled() {
-				value, err := dec.ReadValue()
-				if err != nil {
-					return nil, mediaCounts{}, err
+			if key == "tools" {
+				sawTools = true
+				if deferred.enabled && len(plan.defs) > 0 {
+					value, err := dec.ReadValue()
+					if err != nil {
+						return nil, mediaCounts{}, err
+					}
+					merged, ok := appendToolDefinitions(value, plan.defs)
+					if err := enc.WriteToken(jsontext.String("tools")); err != nil {
+						return nil, mediaCounts{}, err
+					}
+					if ok {
+						if err := enc.WriteValue(merged); err != nil {
+							return nil, mediaCounts{}, err
+						}
+					} else if err := replayValue(enc, value); err != nil {
+						return nil, mediaCounts{}, err
+					}
+					continue
 				}
-				processed, replaced, changed, err := rewriteMessages(value, media)
-				if err != nil {
-					return nil, mediaCounts{}, err
+			}
+			if key == "messages" && (media.enabled() || plan.messagesChanged) {
+				// A planned messages array is written from the plan; skip the
+				// original bytes without materializing them (SkipValue does
+				// not buffer the value the way ReadValue does).
+				var value jsontext.Value
+				if plan.messagesChanged {
+					if err := dec.SkipValue(); err != nil {
+						return nil, mediaCounts{}, err
+					}
+				} else {
+					read, err := dec.ReadValue()
+					if err != nil {
+						return nil, mediaCounts{}, err
+					}
+					value = read
+				}
+				current := value
+				if plan.messagesChanged {
+					current = plan.messages
+				}
+				processed := current
+				var replaced mediaCounts
+				mediaChanged := false
+				if media.enabled() {
+					var err error
+					processed, replaced, mediaChanged, err = rewriteMessages(current, media)
+					if err != nil {
+						return nil, mediaCounts{}, err
+					}
 				}
 				// Write the key after the read for the same reason as
 				// rewriteSystem: tok is void once the decoder advances.
 				if err := enc.WriteToken(jsontext.String("messages")); err != nil {
 					return nil, mediaCounts{}, err
 				}
-				if changed {
+				if plan.messagesChanged || mediaChanged {
 					if err := enc.WriteValue(processed); err != nil {
 						return nil, mediaCounts{}, err
 					}
@@ -196,6 +240,19 @@ func rewrite(raw []byte, model string, stripBilling, insertHeader bool, media me
 			// by the next key; a container's closing token is read at
 			// depth 2, so valueNext correctly stays false through nesting.
 			valueNext = false
+		}
+
+		// The root object is closing without a tools member: plant the
+		// flattened definitions before the closing brace. The Encoder
+		// supplies the member separator.
+		if deferred.enabled && len(plan.defs) > 0 && !sawTools && depth == 1 && kind == '}' {
+			merged, _ := appendToolDefinitions(nil, plan.defs)
+			if err := enc.WriteToken(jsontext.String("tools")); err != nil {
+				return nil, mediaCounts{}, err
+			}
+			if err := enc.WriteValue(merged); err != nil {
+				return nil, mediaCounts{}, err
+			}
 		}
 
 		// The root object is closing without a system member: plant the
