@@ -192,3 +192,62 @@ func TestToolRefMaps(t *testing.T) {
 		})
 	}
 }
+
+func TestAddOrPromote(t *testing.T) {
+	t.Run("nil receiver is a no-op", func(t *testing.T) {
+		var ctx *Context
+		ctx.AddOrPromote([]anthropic.Tool{{Name: "A"}})
+	})
+
+	t.Run("appends in order, skips active, promotes deferred with stored definition", func(t *testing.T) {
+		ctx := NewContext([]anthropic.Tool{
+			{Type: anthropic.ToolTypeSearchRegex, Name: "ts"},
+			{Name: "Active1", Description: "active definition"},
+			{Name: "Deferred1", Description: "stored definition", DeferLoading: true},
+		})
+		ctx.AddOrPromote([]anthropic.Tool{
+			{Name: "Deferred1", Description: "inline definition"},
+			{Name: "Active1", Description: "inline definition"},
+			{Name: "New1"},
+			{Name: "New2"},
+		})
+
+		want := []string{"Active1", "Deferred1", "New1", "New2"}
+		if len(ctx.ActiveTools) != len(want) {
+			t.Fatalf("ActiveTools = %+v, want %v", ctx.ActiveTools, want)
+		}
+		for i, name := range want {
+			if ctx.ActiveTools[i].Name != name {
+				t.Fatalf("ActiveTools[%d] = %q, want %q", i, ctx.ActiveTools[i].Name, name)
+			}
+		}
+		if ctx.ActiveTools[0].Description != "active definition" {
+			t.Fatalf("existing active definition replaced: %q", ctx.ActiveTools[0].Description)
+		}
+		if ctx.ActiveTools[1].Description != "stored definition" {
+			t.Fatalf("deferred tool should be promoted with the stored definition, got %q", ctx.ActiveTools[1].Description)
+		}
+		if _, ok := ctx.DeferredTools["Deferred1"]; ok {
+			t.Fatal("promoted tool still present in DeferredTools")
+		}
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		ctx := NewContext([]anthropic.Tool{
+			{Type: anthropic.ToolTypeSearchRegex, Name: "ts"},
+			{Name: "Base"},
+		})
+		defs := []anthropic.Tool{{Name: "A"}, {Name: "B"}}
+		ctx.AddOrPromote(defs)
+		ctx.AddOrPromote(defs)
+		want := []string{"Base", "A", "B"}
+		if len(ctx.ActiveTools) != len(want) {
+			t.Fatalf("ActiveTools = %+v, want %v", ctx.ActiveTools, want)
+		}
+		for i, name := range want {
+			if ctx.ActiveTools[i].Name != name {
+				t.Fatalf("ActiveTools[%d] = %q, want %q", i, ctx.ActiveTools[i].Name, name)
+			}
+		}
+	})
+}

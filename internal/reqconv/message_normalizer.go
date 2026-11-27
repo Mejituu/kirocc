@@ -14,10 +14,13 @@ const (
 )
 
 // Normalize runs the normalization pipeline on messages. Ordering matters:
-// server-side tool rounds are split into the user/assistant alternation Kiro
-// requires first (it inspects the original packed assistant blocks), then tool
-// content handling, role normalization, merging, and alternation fixups.
+// inline tool blocks are removed first (their definitions are collected before
+// Normalize by the caller), then server-side tool rounds are split into the
+// user/assistant alternation Kiro requires (it inspects the original packed
+// assistant blocks), then tool content handling, role normalization, merging,
+// and alternation fixups.
 func Normalize(msgs []anthropic.Message, hasTools bool) []anthropic.Message {
+	msgs = stripInlineToolBlocks(msgs)
 	msgs = ExpandServerToolResults(msgs)
 	msgs = textualizeToolContent(msgs, hasTools)
 	msgs = normalizeRoles(msgs)
@@ -76,14 +79,23 @@ func textualizeOrphanToolResults(msgs []anthropic.Message) []anthropic.Message {
 			result = append(result, msg)
 			continue
 		}
-		// Collect tool_use IDs from the preceding assistant message.
+		// Collect tool_use IDs from the nearest preceding user/assistant
+		// message. Mid-conversation system/developer messages may sit between
+		// the tool_use and its tool_result; skipping them keeps the pair
+		// structured instead of textualizing a result that is not an orphan.
 		assistantToolIDs := make(map[string]struct{})
-		if i > 0 && msgs[i-1].Role == "assistant" && !msgs[i-1].Content.IsString() {
-			for _, b := range msgs[i-1].Content.Blocks {
-				if b.IsToolUse() {
-					assistantToolIDs[b.ID] = struct{}{}
+		for j := i - 1; j >= 0; j-- {
+			if msgs[j].Role != "user" && msgs[j].Role != "assistant" {
+				continue
+			}
+			if msgs[j].Role == "assistant" && !msgs[j].Content.IsString() {
+				for _, b := range msgs[j].Content.Blocks {
+					if b.IsToolUse() {
+						assistantToolIDs[b.ID] = struct{}{}
+					}
 				}
 			}
+			break
 		}
 
 		var newBlocks []anthropic.ContentBlock

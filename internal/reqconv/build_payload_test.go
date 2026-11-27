@@ -7,6 +7,7 @@ import (
 
 	"github.com/d-kuro/kirocc/internal/anthropic"
 	"github.com/d-kuro/kirocc/internal/kiroproto"
+	"github.com/d-kuro/kirocc/internal/toolsearch"
 )
 
 func buildPayloadForTest(req *anthropic.Request, profileARN, modelID, conversationID string) (*kiroproto.Payload, error) {
@@ -1024,4 +1025,314 @@ func TestBuildPayload_RedactedThinkingReplay_SkipsToolSearchRoundBlob(t *testing
 			t.Fatalf("history[%d] replayed a stale tool-search blob: %+v", i, arm.ReasoningContent)
 		}
 	}
+}
+
+func currentToolSpecs(payload *kiroproto.Payload) []*kiroproto.ToolSpecification {
+	ctx := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if ctx == nil {
+		return nil
+	}
+	var specs []*kiroproto.ToolSpecification
+	for _, e := range ctx.Tools {
+		if e.ToolSpecification != nil {
+			specs = append(specs, e.ToolSpecification)
+		}
+	}
+	return specs
+}
+
+func assertToolSpecNames(t *testing.T, payload *kiroproto.Payload, want []string) {
+	t.Helper()
+	specs := currentToolSpecs(payload)
+	if len(specs) != len(want) {
+		t.Fatalf("tool count = %d, want %d", len(specs), len(want))
+	}
+	for i := range want {
+		if specs[i].Name != want[i] {
+			t.Fatalf("tool[%d] = %q, want %q", i, specs[i].Name, want[i])
+		}
+	}
+}
+
+func TestBuildPayload_InlineToolAdditionsMergeIntoToolList(t *testing.T) {
+	req := &anthropic.Request{
+		Model: "claude-sonnet-4-6",
+		Tools: []anthropic.Tool{
+			{Name: "Existing", Description: "original definition", InputSchema: map[string]any{"type": "object"}},
+		},
+		Messages: []anthropic.Message{
+			{Role: "user", Content: anthropic.MessageContent{Text: "hello"}},
+			{
+				Role: "system",
+				Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+					{Type: anthropic.BlockTypeText, Text: "tools loaded"},
+					inlineAddition("Added1"),
+					inlineAddition("Added2"),
+					inlineAddition("Existing"),
+				}},
+			},
+			{Role: "assistant", Content: anthropic.MessageContent{Text: "ok"}},
+			{Role: "user", Content: anthropic.MessageContent{Text: "go"}},
+		},
+	}
+	payload, _, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolSpecNames(t, payload, []string{"Existing", "Added1", "Added2"})
+	if desc := currentToolSpecs(payload)[0].Description; desc != "original definition" {
+		t.Fatalf("existing definition was overwritten: %q", desc)
+	}
+}
+
+func TestBuildPayload_InlineToolAdditionFromAnyRoleWithoutDeclaredTools(t *testing.T) {
+	req := &anthropic.Request{
+		Model: "claude-sonnet-4-6",
+		Messages: []anthropic.Message{
+			{Role: "user", Content: anthropic.MessageContent{Text: "hi"}},
+			{
+				Role: "assistant",
+				Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+					inlineAddition("LateTool"),
+				}},
+			},
+			{Role: "user", Content: anthropic.MessageContent{Text: "go"}},
+		},
+	}
+	payload, _, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolSpecNames(t, payload, []string{"LateTool"})
+}
+
+func TestBuildPayload_InlineToolAdditionLongNameUsesNameMap(t *testing.T) {
+	longName := strings.Repeat("mcp__server__", 8)
+	req := &anthropic.Request{
+		Model: "claude-sonnet-4-6",
+		Messages: []anthropic.Message{
+			{Role: "user", Content: anthropic.MessageContent{Text: "hi"}},
+			{
+				Role: "system",
+				Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+					inlineAddition(longName),
+				}},
+			},
+			{Role: "user", Content: anthropic.MessageContent{Text: "go"}},
+		},
+	}
+	payload, nameMap, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := currentToolSpecs(payload)
+	if len(specs) != 1 {
+		t.Fatalf("tool count = %d, want 1", len(specs))
+	}
+	if got := specs[0].Name; len(got) > 64 {
+		t.Fatalf("tool name not shortened: %d chars", len(got))
+	}
+	if got := nameMap.Restore(specs[0].Name); got != longName {
+		t.Fatalf("nameMap restore = %q, want %q", got, longName)
+	}
+}
+
+func TestBuildPayload_InlineToolAdditionPromotesDeferredTool(t *testing.T) {
+	tools := []anthropic.Tool{
+		{Type: anthropic.ToolTypeSearchRegex, Name: "tool_search_tool_regex"},
+		{Name: "ActiveTool", Description: "active definition", InputSchema: map[string]any{"type": "object"}},
+		{Name: "Deferred", Description: "stored definition", DeferLoading: true, InputSchema: map[string]any{"type": "object"}},
+	}
+	tsCtx := toolsearch.NewContext(tools)
+	req := &anthropic.Request{
+		Model: "claude-sonnet-4-6",
+		Tools: tools,
+		Messages: []anthropic.Message{
+			{Role: "user", Content: anthropic.MessageContent{Text: "hi"}},
+			{
+				Role: "system",
+				Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+					{Type: anthropic.BlockTypeToolAddition, Tool: &anthropic.ToolAddition{
+						Type:       anthropic.BlockTypeToolDefinition,
+						Definition: &anthropic.Tool{Name: "Deferred", Description: "inline definition"},
+					}},
+					{Type: anthropic.BlockTypeToolAddition, Tool: &anthropic.ToolAddition{
+						Type:       anthropic.BlockTypeToolDefinition,
+						Definition: &anthropic.Tool{Name: "ActiveTool", Description: "inline definition"},
+					}},
+				}},
+			},
+			{Role: "user", Content: anthropic.MessageContent{Text: "go"}},
+		},
+	}
+	opts := BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test", ToolSearchCtx: tsCtx}
+	payload, _, err := BuildPayload(req, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolSpecNames(t, payload, []string{"ActiveTool", "Deferred", toolsearch.KiroToolSearchName})
+	for _, spec := range currentToolSpecs(payload) {
+		switch spec.Name {
+		case "Deferred":
+			if spec.Description != "stored definition" {
+				t.Fatalf("promoted tool should use the stored definition, got %q", spec.Description)
+			}
+		case "ActiveTool":
+			if spec.Description != "active definition" {
+				t.Fatalf("already active definition should win, got %q", spec.Description)
+			}
+		}
+	}
+	if _, ok := tsCtx.DeferredTools["Deferred"]; ok {
+		t.Fatal("promoted tool still present in DeferredTools")
+	}
+	if len(tsCtx.ActiveTools) != 2 {
+		t.Fatalf("ActiveTools len = %d, want 2", len(tsCtx.ActiveTools))
+	}
+
+	// A second build over the same context must not duplicate the tools.
+	payload, _, err = BuildPayload(req, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolSpecNames(t, payload, []string{"ActiveTool", "Deferred", toolsearch.KiroToolSearchName})
+	if len(tsCtx.ActiveTools) != 2 {
+		t.Fatalf("ActiveTools len after second build = %d, want 2", len(tsCtx.ActiveTools))
+	}
+}
+
+func TestBuildPayload_ToolResultDefinitionPromotesToolAndLeavesEmptyResult(t *testing.T) {
+	req := &anthropic.Request{
+		Model: "claude-sonnet-4-6",
+		Messages: []anthropic.Message{
+			{Role: "user", Content: anthropic.MessageContent{Text: "run"}},
+			{
+				Role: "assistant",
+				Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+					{Type: anthropic.BlockTypeToolUse, ID: "t1", Name: "Lookup", Input: map[string]any{}},
+				}},
+			},
+			{
+				Role: "user",
+				Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+					{
+						Type:      anthropic.BlockTypeToolResult,
+						ToolUseID: "t1",
+						Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+							inlineDefinition("Loaded"),
+						}},
+					},
+				}},
+			},
+		},
+	}
+	payload, _, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolSpecNames(t, payload, []string{"Loaded"})
+	ctx := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if ctx == nil || len(ctx.ToolResults) != 1 {
+		t.Fatalf("toolResults = %+v, want 1", ctx)
+	}
+	stdout, _ := ctx.ToolResults[0].Content[0].JSON["stdout"].(string)
+	if stdout != "(empty result)" {
+		t.Fatalf("stdout = %q, want %q", stdout, "(empty result)")
+	}
+}
+
+func TestBuildPayload_InlineOnlySystemMessageLeavesNoPlaceholder(t *testing.T) {
+	t.Run("only inline blocks", func(t *testing.T) {
+		req := &anthropic.Request{
+			Model: "claude-sonnet-4-6",
+			Messages: []anthropic.Message{
+				{Role: "user", Content: anthropic.MessageContent{Text: "a"}},
+				{
+					Role: "system",
+					Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+						inlineAddition("A"),
+						{Type: anthropic.BlockTypeToolRemoval},
+					}},
+				},
+				{Role: "user", Content: anthropic.MessageContent{Text: "b"}},
+			},
+		}
+		payload, _, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+		if content != "a\nb" {
+			t.Fatalf("content = %q, want %q", content, "a\nb")
+		}
+	})
+
+	t.Run("text beside inline blocks", func(t *testing.T) {
+		req := &anthropic.Request{
+			Model: "claude-sonnet-4-6",
+			Messages: []anthropic.Message{
+				{Role: "user", Content: anthropic.MessageContent{Text: "a"}},
+				{
+					Role: "system",
+					Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+						{Type: anthropic.BlockTypeText, Text: "note"},
+						inlineAddition("A"),
+					}},
+				},
+				{Role: "user", Content: anthropic.MessageContent{Text: "b"}},
+			},
+		}
+		payload, _, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+		if content != "a\nnote\nb" {
+			t.Fatalf("content = %q, want %q", content, "a\nnote\nb")
+		}
+		if contains(content, "["+anthropic.BlockTypeToolAddition+"]") {
+			t.Fatalf("tool_addition placeholder leaked: %q", content)
+		}
+	})
+}
+
+func TestBuildPayload_UnknownBlockStillTextualized(t *testing.T) {
+	req := &anthropic.Request{
+		Model: "claude-sonnet-4-6",
+		Messages: []anthropic.Message{
+			{
+				Role: "user",
+				Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+					{Type: "future_block", Name: "opaque"},
+				}},
+			},
+		},
+	}
+	payload, _, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content := payload.ConversationState.CurrentMessage.UserInputMessage.Content; content != "[future_block: opaque]" {
+		t.Fatalf("content = %q, want placeholder text", content)
+	}
+}
+
+func TestBuildPayload_NoInlineBlocksKeepsDeclaredTools(t *testing.T) {
+	req := &anthropic.Request{
+		Model: "claude-sonnet-4-6",
+		Tools: []anthropic.Tool{
+			{Name: "Read", InputSchema: map[string]any{"type": "object"}},
+			{Name: "Edit", InputSchema: map[string]any{"type": "object"}},
+		},
+		Messages: []anthropic.Message{
+			{Role: "user", Content: anthropic.MessageContent{Text: "hello"}},
+			{Role: "assistant", Content: anthropic.MessageContent{Text: "hi"}},
+			{Role: "user", Content: anthropic.MessageContent{Text: "go"}},
+		},
+	}
+	payload, _, err := BuildPayload(req, BuildOptions{ModelID: "claude-sonnet-4.6", ConversationID: "conv-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertToolSpecNames(t, payload, []string{"Read", "Edit"})
 }

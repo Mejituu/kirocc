@@ -117,6 +117,97 @@ func TestStep1b_TextualizeOrphanToolResults(t *testing.T) {
 	}
 }
 
+func TestNormalize_SystemBetweenToolUseAndResultKeepsToolResult(t *testing.T) {
+	msgs := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Text: "Run it"}},
+		{
+			Role: "assistant",
+			Content: anthropic.MessageContent{
+				Blocks: []anthropic.ContentBlock{
+					{Type: anthropic.BlockTypeToolUse, ID: "t1", Name: "Bash", Input: map[string]any{"command": "ls"}},
+				},
+			},
+		},
+		{Role: "system", Content: anthropic.MessageContent{Text: "Reminder: timezone is UTC+8."}},
+		{
+			Role: "user",
+			Content: anthropic.MessageContent{
+				Blocks: []anthropic.ContentBlock{
+					{Type: anthropic.BlockTypeToolResult, ToolUseID: "t1", Content: anthropic.MessageContent{Text: "GREEN-42"}},
+				},
+			},
+		},
+	}
+	got := Normalize(msgs, true)
+	if len(got) != 3 {
+		t.Fatalf("got %d messages, want 3: %+v", len(got), got)
+	}
+	last := got[2]
+	if last.Role != "user" {
+		t.Fatalf("last role = %q, want user", last.Role)
+	}
+	if len(last.Content.Blocks) != 2 {
+		t.Fatalf("last blocks = %+v, want tool_result + text", last.Content.Blocks)
+	}
+	if last.Content.Blocks[0].Type != anthropic.BlockTypeToolResult || last.Content.Blocks[0].ToolUseID != "t1" {
+		t.Fatalf("tool_result must stay structured, got %+v", last.Content.Blocks[0])
+	}
+	if last.Content.Blocks[1].Type != anthropic.BlockTypeText || last.Content.Blocks[1].Text != "Reminder: timezone is UTC+8." {
+		t.Fatalf("system text must follow the tool_result, got %+v", last.Content.Blocks[1])
+	}
+}
+
+func TestNormalize_DropsInlineOnlySystemMessageAndMergesUsers(t *testing.T) {
+	msgs := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Text: "a"}},
+		{
+			Role: "system",
+			Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+				{Type: anthropic.BlockTypeToolAddition, Tool: &anthropic.ToolAddition{
+					Type:       anthropic.BlockTypeToolDefinition,
+					Definition: &anthropic.Tool{Name: "A"},
+				}},
+				{Type: anthropic.BlockTypeToolRemoval},
+			}},
+		},
+		{Role: "user", Content: anthropic.MessageContent{Text: "b"}},
+	}
+	got := Normalize(msgs, true)
+	if len(got) != 1 {
+		t.Fatalf("got %d messages, want 1: %+v", len(got), got)
+	}
+	if got[0].Role != "user" || got[0].Content.Text != "a\nb" {
+		t.Fatalf("got[0] = %+v, want merged user text", got[0])
+	}
+}
+
+func TestNormalize_KeepsTextBesideInlineToolBlocks(t *testing.T) {
+	msgs := []anthropic.Message{
+		{Role: "user", Content: anthropic.MessageContent{Text: "a"}},
+		{
+			Role: "system",
+			Content: anthropic.MessageContent{Blocks: []anthropic.ContentBlock{
+				{Type: anthropic.BlockTypeText, Text: "note"},
+				{Type: anthropic.BlockTypeToolAddition, Tool: &anthropic.ToolAddition{
+					Type:       anthropic.BlockTypeToolDefinition,
+					Definition: &anthropic.Tool{Name: "A"},
+				}},
+			}},
+		},
+		{Role: "user", Content: anthropic.MessageContent{Text: "b"}},
+	}
+	got := Normalize(msgs, true)
+	if len(got) != 1 {
+		t.Fatalf("got %d messages, want 1: %+v", len(got), got)
+	}
+	if got[0].Content.Text != "a\nnote\nb" {
+		t.Fatalf("merged text = %q, want %q", got[0].Content.Text, "a\nnote\nb")
+	}
+	if strings.Contains(got[0].Content.Text, "["+anthropic.BlockTypeToolAddition+"]") {
+		t.Fatalf("tool_addition placeholder leaked: %q", got[0].Content.Text)
+	}
+}
+
 func TestStep2_MergeAdjacentSameRole(t *testing.T) {
 	msgs := []anthropic.Message{
 		{Role: "user", Content: anthropic.MessageContent{Text: "Hello"}},

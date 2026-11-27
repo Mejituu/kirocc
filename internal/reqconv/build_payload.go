@@ -26,10 +26,13 @@ type BuildOptions struct {
 
 // BuildPayload converts an Anthropic request into a Kiro API payload.
 func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payload, *ToolNameMap, error) {
+	// Inline definitions are collected before Normalize strips the blocks that
+	// carry them, and merged into the tool list below.
+	inlineDefs := collectInlineToolDefinitions(req.Messages)
 	nameMap := NewToolNameMap()
 
 	// 1. Build system prompt and convert tools.
-	systemPrompt, toolEntries := buildSystemAndTools(req, options.ToolSearchCtx, options.AdvisorCtx, options.WebSearchCtx, nameMap)
+	systemPrompt, toolEntries := buildSystemAndTools(req, options.ToolSearchCtx, options.AdvisorCtx, options.WebSearchCtx, inlineDefs, nameMap)
 
 	// envState is derived from the system prompt's <env> block (no host
 	// fallback) and only ever attached to the current message.
@@ -90,7 +93,7 @@ func BuildPayload(req *anthropic.Request, options BuildOptions) (*kiroproto.Payl
 }
 
 // buildSystemAndTools extracts the system prompt and converts tools.
-func buildSystemAndTools(req *anthropic.Request, tsCtx *toolsearch.Context, advisorCtx *advisor.Context, wsCtx *websearch.Context, nameMap *ToolNameMap) (string, []kiroproto.ToolEntry) {
+func buildSystemAndTools(req *anthropic.Request, tsCtx *toolsearch.Context, advisorCtx *advisor.Context, wsCtx *websearch.Context, inlineDefs []anthropic.Tool, nameMap *ToolNameMap) (string, []kiroproto.ToolEntry) {
 	systemPrompt := ExtractSystemPrompt(req.System)
 
 	// Server-side tool definitions (tool search, advisor, web search) are
@@ -101,6 +104,7 @@ func buildSystemAndTools(req *anthropic.Request, tsCtx *toolsearch.Context, advi
 	if tsCtx != nil {
 		tools = tsCtx.ActiveTools
 	}
+	tools = mergeInlineToolDefs(tools, tsCtx, inlineDefs)
 	callable := anthropic.CallableTools(tools)
 
 	var toolEntries []kiroproto.ToolEntry
@@ -118,6 +122,36 @@ func buildSystemAndTools(req *anthropic.Request, tsCtx *toolsearch.Context, advi
 		toolEntries = append(toolEntries, wsCtx.KiroToolEntry())
 	}
 	return systemPrompt, toolEntries
+}
+
+// mergeInlineToolDefs appends tool definitions carried inside the conversation
+// to the request's tool list. With a tool-search context they go through it, so
+// a deferred tool is promoted to the active set with its stored definition and
+// repeated calls stay idempotent. Without one, base is copied and defs are
+// appended in order, skipping names already present: the existing definition
+// wins and the order stays stable across requests.
+func mergeInlineToolDefs(base []anthropic.Tool, tsCtx *toolsearch.Context, defs []anthropic.Tool) []anthropic.Tool {
+	if len(defs) == 0 {
+		return base
+	}
+	if tsCtx != nil {
+		tsCtx.AddOrPromote(defs)
+		return tsCtx.ActiveTools
+	}
+	out := make([]anthropic.Tool, 0, len(base)+len(defs))
+	out = append(out, base...)
+	seen := make(map[string]struct{}, len(base)+len(defs))
+	for _, t := range base {
+		seen[t.Name] = struct{}{}
+	}
+	for _, t := range defs {
+		if _, ok := seen[t.Name]; ok {
+			continue
+		}
+		seen[t.Name] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 // splitMessages splits normalized messages into history messages and the last message.

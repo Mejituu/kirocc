@@ -154,6 +154,12 @@ type ContentBlock struct {
 	// tool_reference block
 	ToolName string `json:"tool_name,omitempty"`
 
+	// tool_addition block (Claude Code mid-conversation tool additions).
+	Tool *ToolAddition `json:"tool,omitempty"`
+
+	// tool_definition block (inside tool_result content).
+	Definition *Tool `json:"definition,omitempty"`
+
 	// tool_search_tool_search_result (nested inside tool_search_tool_result content)
 	ToolReferences []ContentBlock `json:"tool_references,omitempty"`
 
@@ -270,6 +276,14 @@ const (
 	BlockTypeWebSearchResult        = "web_search_result"
 	BlockTypeWebSearchResultError   = "web_search_tool_result_error"
 )
+
+// ToolAddition is the tool payload of a tool_addition block. Type is
+// "tool_definition" when Definition is present, or "tool_reference" for the
+// older name-only form.
+type ToolAddition struct {
+	Type       string `json:"type"`
+	Definition *Tool  `json:"definition,omitempty"`
+}
 
 // Tool represents a tool definition in the Anthropic API.
 type Tool struct {

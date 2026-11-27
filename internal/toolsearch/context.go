@@ -66,6 +66,33 @@ func (c *Context) PromoteTools(names []string) {
 	}
 }
 
+// AddOrPromote adds inline tool definitions (carried in the conversation) to
+// the active set. A name already active is skipped; a name present in
+// DeferredTools is promoted using the stored definition and removed from the
+// deferred map; anything else is appended in defs order. Safe to call on a nil
+// receiver, and idempotent across repeated calls with the same definitions.
+func (c *Context) AddOrPromote(defs []anthropic.Tool) {
+	if c == nil {
+		return
+	}
+	active := make(map[string]struct{}, len(c.ActiveTools)+len(defs))
+	for _, t := range c.ActiveTools {
+		active[t.Name] = struct{}{}
+	}
+	for _, def := range defs {
+		if _, ok := active[def.Name]; ok {
+			continue
+		}
+		if stored, ok := c.DeferredTools[def.Name]; ok {
+			c.ActiveTools = append(c.ActiveTools, stored)
+			delete(c.DeferredTools, def.Name)
+		} else {
+			c.ActiveTools = append(c.ActiveTools, def)
+		}
+		active[def.Name] = struct{}{}
+	}
+}
+
 // ToolRefMaps builds tool_reference map entries from a list of tool names.
 func ToolRefMaps(names []string) []map[string]any {
 	refs := make([]map[string]any, len(names))
