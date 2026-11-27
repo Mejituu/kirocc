@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1047,4 +1048,74 @@ func TestDoTokenRefresh_ExpiredRefreshTokenGuidance(t *testing.T) {
 			t.Fatalf("401 classified as expired refresh token: %v", err)
 		}
 	})
+}
+
+// TestReadCredentials_ClientSecretExpiry checks the registration's
+// client_secret_expires_at lands on Credentials.
+func TestReadCredentials_ClientSecretExpiry(t *testing.T) {
+	expiry := time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	db := setupTestDB(t)
+	insertTokenRow(t, db, "kirocli:odic:token", `{"access_token":"a","refresh_token":"r","expires_at":1}`)
+	regJSON, _ := json.Marshal(map[string]any{
+		"client_id":                "cid",
+		"client_secret":            "csec",
+		"client_secret_expires_at": expiry,
+	})
+	insertTokenRow(t, db, "kirocli:odic:device-registration", string(regJSON))
+
+	creds, err := ReadCredentials(db)
+	if err != nil {
+		t.Fatalf("ReadCredentials: %v", err)
+	}
+	want, _ := time.Parse(time.RFC3339, expiry)
+	if creds.ClientSecretExpiresAt != want.Unix() {
+		t.Fatalf("ClientSecretExpiresAt = %d, want %d", creds.ClientSecretExpiresAt, want.Unix())
+	}
+}
+
+func TestWarnClientSecretExpiry(t *testing.T) {
+	cases := []struct {
+		name   string
+		expiry time.Time
+		want   string // "" means no warning expected
+	}{
+		{"absent", time.Time{}, ""},
+		{"far", time.Now().Add(100 * 24 * time.Hour), ""},
+		{"soon", time.Now().Add(3 * 24 * time.Hour), "expiring soon"},
+		{"lapsed", time.Now().Add(-20 * 24 * time.Hour), "expired"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			creds := &Credentials{ClientSecretExpiresAt: tc.expiry.Unix()}
+			if tc.expiry.IsZero() {
+				creds.ClientSecretExpiresAt = 0
+			}
+			warnClientSecretExpiry(creds)
+			out := logs.String()
+			if tc.want == "" {
+				if strings.Contains(out, "device registration") {
+					t.Fatalf("unexpected warning:\n%s", out)
+				}
+				return
+			}
+			if !strings.Contains(out, tc.want) || !strings.Contains(out, "kiro-cli") {
+				t.Fatalf("warning missing guidance:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestCredentialLogAttrs_ClientSecretExpiry keeps the expiry visible on every
+// credentials log line.
+func TestCredentialLogAttrs_ClientSecretExpiry(t *testing.T) {
+	creds := &Credentials{ClientSecretExpiresAt: time.Now().Add(48 * time.Hour).Unix()}
+	var parts []string
+	for _, a := range credentialLogAttrs(creds) {
+		parts = append(parts, fmt.Sprint(a))
+	}
+	joined := strings.Join(parts, " ")
+	if !strings.Contains(joined, "client_secret_expires_at") {
+		t.Fatalf("attr missing: %s", joined)
+	}
 }

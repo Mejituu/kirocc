@@ -31,12 +31,16 @@ type Credentials struct {
 	AccessToken  string
 	RefreshToken string
 	ExpiresAt    int64
-	Region       string // API region
-	SSORegion    string // OIDC region (may differ from API region)
-	ClientID     string
-	ClientSecret string
-	ProfileARN   string // from state table, key "api.codewhisperer.profile"
-	AuthType     string // "social", "idc", or "api_key"
+	// ClientSecretExpiresAt is the device registration's client-secret
+	// lifetime (auth_kv device-registration row, client_secret_expires_at);
+	// 0 when the row carries none (social logins).
+	ClientSecretExpiresAt int64
+	Region                string // API region
+	SSORegion             string // OIDC region (may differ from API region)
+	ClientID              string
+	ClientSecret          string
+	ProfileARN            string // from state table, key "api.codewhisperer.profile"
+	AuthType              string // "social", "idc", or "api_key"
 }
 
 // ErrNoCredentials is returned when no token key is found in the database.
@@ -128,12 +132,17 @@ func readCredentials(db *sql.DB) (*Credentials, *credentialSource, error) {
 			ClientSecret  string `json:"clientSecret"`
 			ClientIDS     string `json:"client_id"`
 			ClientSecretS string `json:"client_secret"`
+			// Kiro-cli writes the registration snake_case; keep a camel
+			// spelling for symmetry with the fields above.
+			SecretExpiresAt  any `json:"client_secret_expires_at"`
+			SecretExpiresAtC any `json:"clientSecretExpiresAt"`
 		}
 		if err := json.Unmarshal([]byte(regJSON), &regData); err != nil {
 			return nil, nil, fmt.Errorf("parse device registration JSON: %w", err)
 		}
 		creds.ClientID = coalesce(regData.ClientID, regData.ClientIDS)
 		creds.ClientSecret = coalesce(regData.ClientSecret, regData.ClientSecretS)
+		creds.ClientSecretExpiresAt = parseExpiresAt(regData.SecretExpiresAt, regData.SecretExpiresAtC)
 	}
 
 	stateRegion, stateErr := readState(db, "auth.idc.region")

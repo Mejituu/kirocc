@@ -179,6 +179,7 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 
 	if isTokenValid(creds.ExpiresAt) {
 		slog.Info("credentials loaded", credentialLogAttrs(creds)...)
+		warnClientSecretExpiry(creds)
 		m.mu.Lock()
 		m.cached = creds
 		m.mu.Unlock()
@@ -205,6 +206,10 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	}
 	if err != nil {
 		slog.Error("token refresh failed", "auth_type", creds.AuthType, "err", err)
+		// A lapsed device registration is the usual cause of a permanent
+		// refresh failure (invalid_request upstream); surface it here so the
+		// bare 400 is not the only thing the operator sees.
+		warnClientSecretExpiry(creds)
 		return nil, fmt.Errorf("token refresh: %w", err)
 	}
 
@@ -225,6 +230,7 @@ func (m *AuthManager) refreshCredentials(ctx context.Context) (*Credentials, err
 	}
 
 	slog.Info("token refreshed", credentialLogAttrs(refreshed)...)
+	warnClientSecretExpiry(refreshed)
 
 	m.mu.Lock()
 	m.cached = refreshed
@@ -392,5 +398,35 @@ func credentialLogAttrs(creds *Credentials) []any {
 	if creds.ExpiresAt > 0 {
 		attrs = append(attrs, "token_expires_at", time.Unix(creds.ExpiresAt, 0).Format(time.DateTime))
 	}
+	if creds.ClientSecretExpiresAt > 0 {
+		attrs = append(attrs, "client_secret_expires_at", time.Unix(creds.ClientSecretExpiresAt, 0).Format(time.DateTime))
+	}
 	return attrs
+}
+
+// clientSecretWarnDays is how close to the device registration's client-secret
+// expiry kirocc starts warning. The secret's lifetime is roughly 90 days; a
+// lapsed registration makes every refresh fail upstream (invalid_request /
+// invalid_grant) and only a kiro-cli re-login recovers it.
+const clientSecretWarnDays = 7
+
+// warnClientSecretExpiry surfaces the device registration's client-secret
+// lifetime once it is expired or nearly so. The expiry date itself rides on
+// every credentials log line via credentialLogAttrs.
+func warnClientSecretExpiry(creds *Credentials) {
+	if creds == nil || creds.ClientSecretExpiresAt == 0 {
+		return
+	}
+	days := time.Until(time.Unix(creds.ClientSecretExpiresAt, 0)).Hours() / 24
+	if days < 0 {
+		slog.Warn("device registration expired: client secret lapsed",
+			"days_past", int(-days),
+			"action", "re-login with kiro-cli")
+		return
+	}
+	if days < clientSecretWarnDays {
+		slog.Warn("device registration client secret expiring soon",
+			"days_left", int(days),
+			"action", "re-login with kiro-cli before it lapses")
+	}
 }
